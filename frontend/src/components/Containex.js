@@ -45,16 +45,13 @@ export const Containex = () => {
   useEffect(() => {
     axios.get('http://localhost:5002/rooms')
       .then(response => {
+        console.log(response.data);
         setRooms(response.data);
       })
       .catch(error => {
         console.error('There was an error!', error);
       });
   }, []);
-
-  const handleRoomStateChange = (roomName) => {
-    console.log(`Room state changed for ${roomName}`);
-  };
 
   const handleCreateRoom = () => {
     const room = {
@@ -82,7 +79,12 @@ export const Containex = () => {
   };
 
   const handlePasswordSubmit = () => {
-    history.push(`/room/${joinRoomId}`);
+    const room = rooms.find(room => room._id === joinRoomId);
+    if (room && room.password === password) {
+      history.push(`/room/${joinRoomId}`);
+    } else {
+      alert('Incorrect password');
+    }
   };
 
   return (
@@ -101,7 +103,6 @@ export const Containex = () => {
               roomId={room._id}
               roomName={room.name}
               isPublic={!room.is_private}
-              onStateChange={handleRoomStateChange}
               onJoin={() => handleJoinRoom(room._id, !room.is_private)}
             />
           )) : <p className="text-white">No rooms available. Create one?</p>}

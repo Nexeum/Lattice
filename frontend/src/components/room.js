@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Card, Button, Modal, TextInput, Label, Textarea, Spinner, CheckCircle } from "flowbite-react";
+import { Card, Button, Modal, TextInput, Label, Textarea, Spinner, Table } from "flowbite-react";
 import { useParams } from 'react-router-dom';
 import { Cli } from './Cli';
 
@@ -11,11 +11,12 @@ export const Room = () => {
   const [openModalValidate, setOpenModalValidate] = useState(true);
   const [containerName, setContainerName] = useState('');
   const [containerImage, setContainerImage] = useState('');
+  const [containerShell, setContainerShell] = useState('');
   const [containerCreationOutput, setContainerCreationOutput] = useState('');
-  const [creationResult, setCreationResult] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [containers, setContainers] = useState([]);
+  const [creationResult, setCreationResult] = useState('');
 
   useEffect(() => {
     axios.get(`http://localhost:5002/rooms/${id}`)
@@ -48,6 +49,18 @@ export const Room = () => {
       });
   }, [id]);
 
+  const createContainer = () => {
+    axios.get(`http://localhost:5001/container/${id}/${containerName}/${containerImage}/${containerShell}`)
+      .then(function (response) {
+        console.log(response.data);
+        setCreationResult("Container created successfully with output: " + response.data.output);
+      })
+      .catch(function (error) {
+        console.log(error);
+        setCreationResult("Failed to create container: " + error.message);
+      });
+  }
+
   const validationSteps = ['Creating orchestrator docker', 'Preparing docker', 'Adding service', 'Starting service'];
 
   return (
@@ -65,16 +78,28 @@ export const Room = () => {
             <Cli />
           </Card>
           <Card className="flex-grow-3">
-            <ul>
-              {containers.map((container, index) => (
-                <li key={index}>
-                  <span>Nombre: {container.name}</span>
-                  <span>Imagen: {container.image}</span>
-                  <span>IP: {container.ports}</span>
-                  <span>Estado: {container.status}</span>
-                </li>
-              ))}
-            </ul>
+            <Table>
+              <Table.Head>
+                <Table.HeadCell>ID</Table.HeadCell>
+                <Table.HeadCell>Name</Table.HeadCell>
+                <Table.HeadCell>Image</Table.HeadCell>
+                <Table.HeadCell>Status</Table.HeadCell>
+                <Table.HeadCell>IP</Table.HeadCell>
+              </Table.Head>
+              <Table.Body className="divide-y">
+                {containers.map((container, index) => (
+                  <Table.Row key={index} className="bg-white dark:border-gray-700 dark:bg-gray-800">
+                    <Table.Cell className="whitespace-nowrap font-medium text-gray-900 dark:text-white">
+                      {container.ID}
+                    </Table.Cell>
+                    <Table.Cell>{container.Name}</Table.Cell>
+                    <Table.Cell>{container.Image}</Table.Cell>
+                    <Table.Cell>{container.Status}</Table.Cell>
+                    <Table.Cell>{container.IP}</Table.Cell>
+                  </Table.Row>
+                ))}
+              </Table.Body>
+            </Table>
           </Card>
         </div>
         <Textarea value={containerCreationOutput} readOnly />
@@ -86,10 +111,12 @@ export const Room = () => {
           <TextInput id="name" value={containerName} onChange={e => setContainerName(e.target.value)} />
           <Label htmlFor="image">Container Image</Label>
           <TextInput id="image" value={containerImage} onChange={e => setContainerImage(e.target.value)} />
+          <Label htmlFor="shell">Shell</Label>
+          <TextInput id="shell" value={containerShell} onChange={e => setContainerShell(e.target.value)} />
           <p>{creationResult}</p>
         </Modal.Body>
         <Modal.Footer>
-          <Button>Create</Button>
+          <Button onClick={createContainer}>Create</Button>
           <Button color="gray" onClick={() => setOpenModalCreate(false)}>
             Cancel
           </Button>

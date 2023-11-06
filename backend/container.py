@@ -23,11 +23,10 @@ def restart_docker_service(container):
     return exec_id.output.decode("utf-8")
 
 @app.post("/containermain/{id}")
-async def create_container(id: str):
+async def create_container_main(id: str):
     containers = {container.name: container for container in client.containers.list(all=True)}
     if id in containers:
-        exec_output = restart_docker_service(containers[id])
-        return {"message": f"Container {id} already exists", "exec_output": exec_output}
+        return {"message": f"Container {id} already exists"}
     container = client.containers.run("nexeum/containex", "sh", detach=True, tty=True, name=id, privileged=True)
     exec_output = restart_docker_service(container)
     return {"message": exec_output, "exec_output": exec_output}
@@ -35,8 +34,16 @@ async def create_container(id: str):
 @app.get("/containers/{container_id}/ps")
 async def list_containers(container_id: str):
     container = client.containers.get(container_id)
-    exec_id = container.exec_run("sh -c 'docker ps -a'", privileged=True)
-    return {"output": exec_id.output.decode("utf-8")}
+    exec_id = container.exec_run("sh -c 'docker ps -a --format \"{{.ID}},{{.Names}},{{.Image}},{{.Status}}\"'", privileged=True)
+    containers_info = exec_id.output.decode("utf-8").split("\n")
+    containers_with_ip = []
+    for container_info in containers_info:
+        if container_info:
+            container_id, name, image, status = container_info.split(",")
+            ip_exec_id = container.exec_run("sh -c 'docker inspect --format \"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\" " + container_id + "'", privileged=True)
+            ip = ip_exec_id.output.decode("utf-8").strip()
+            containers_with_ip.append({"ID": container_id, "Name": name, "Image": image, "Status": status, "IP": ip})
+    return {"output": containers_with_ip}
 
 @app.get("/containers")
 async def get_containers():
@@ -75,3 +82,9 @@ async def get_container_metrics(id: str):
         return metrics
     except Exception as e:
         raise HTTPException(status_code=500, detail={'error': 'Failed to get container metrics', 'message': str(e)})
+    
+@app.get("/container/{container_id}/{name}/{image}/{shell}")
+async def create_container(container_id: str, name: str, image: str, shell: str):
+    container = client.containers.get(container_id)
+    exec_id = container.exec_run(f"sh -c 'docker run -dit --privileged --name {name} {image} {shell}'", privileged=True)
+    return {"output": exec_id.output.decode("utf-8")}
