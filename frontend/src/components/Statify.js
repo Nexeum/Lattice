@@ -24,7 +24,7 @@ const useContainers = () => {
   return { containers, fetchContainers, loading, error };
 };
 
-export const KubeFlow = () => {
+export const Statify = () => {
   const { containers, fetchContainers, loading, error } = useContainers();
   const [showTable, setShowTable] = useState(false);
 

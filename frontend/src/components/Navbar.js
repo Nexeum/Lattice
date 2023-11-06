@@ -6,9 +6,9 @@ export const NavbarRC = () => {
   const location = useLocation();
   const navLinks = [
     { to: "/", label: "Home" },
-    { to: "/kubesh", label: "KubeSh" },
-    { to: "/kubeflow", label: "KubeFlow" },
-    { to: "/kubeia", label: "KubeIA" },
+    { to: "/containex", label: "Containex" },
+    { to: "/statify", label: "Statify" },
+    { to: "/kub", label: "Kub" },
   ];
 
   return (

@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { Card, Button, TextInput } from "flowbite-react";
 
-export const Kubeia = () => {
+export const Kub = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [suggestions, setSuggestions] = useState([

@@ -1,14 +1,45 @@
 import subprocess
 import json
-from flask import Flask, jsonify, request
-from flask_cors import CORS, cross_origin
+from fastapi import FastAPI, HTTPException
+from starlette.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, WebSocket
+import docker
 
-app = Flask(__name__)
-CORS(app)
+client = docker.from_env()
 
-@app.route('/containers', methods=['GET'])
-@cross_origin()
-def get_containers():
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def restart_docker_service(container):
+    exec_id = container.exec_run("sh -c 'service docker stop'", privileged=True)
+    exec_id = container.exec_run("sh -c 'service docker start'", privileged=True)
+    return exec_id.output.decode("utf-8")
+
+@app.post("/containermain/{id}")
+async def create_container(id: str):
+    containers = {container.name: container for container in client.containers.list(all=True)}
+    if id in containers:
+        exec_output = restart_docker_service(containers[id])
+        return {"message": f"Container {id} already exists", "exec_output": exec_output}
+    container = client.containers.run("nexeum/containex", "sh", detach=True, tty=True, name=id, privileged=True)
+    exec_output = restart_docker_service(container)
+    return {"message": exec_output, "exec_output": exec_output}
+
+@app.get("/containers/{container_id}/ps")
+async def list_containers(container_id: str):
+    container = client.containers.get(container_id)
+    exec_id = container.exec_run("sh -c 'docker ps -a'", privileged=True)
+    return {"output": exec_id.output.decode("utf-8")}
+
+@app.get("/containers")
+async def get_containers():
     try:
         output = subprocess.check_output(["docker", "ps", "-a", "--format", "{{json .}}"])
         containers = [json.loads(line) for line in output.splitlines()]
@@ -32,19 +63,15 @@ def get_containers():
             container['Status'] = inspect_data[0]['State']['Status']
             modified_containers.append(container)
 
-        return jsonify(modified_containers)
+        return modified_containers
     except Exception as e:
-        return jsonify({'error': 'Failed to get containers', 'message': str(e)}), 500
-    
-@app.route('/container/<id>/metrics', methods=['GET'])
-@cross_origin()
-def get_container_metrics(id):
+        raise HTTPException(status_code=500, detail={'error': 'Failed to get containers', 'message': str(e)})
+
+@app.get("/container/{id}/metrics")
+async def get_container_metrics(id: str):
     try:
         output = subprocess.check_output(["docker", "stats", id, "--no-stream", "--format", "{{json .}}"])
         metrics = json.loads(output)
-        return jsonify(metrics)
+        return metrics
     except Exception as e:
-        return jsonify({'error': 'Failed to get container metrics', 'message': str(e)}), 500
-
-if __name__ == "__main__":
-    app.run(host='127.0.0.1', port=5001, debug=True)
+        raise HTTPException(status_code=500, detail={'error': 'Failed to get container metrics', 'message': str(e)})

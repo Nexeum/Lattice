@@ -11,7 +11,6 @@ export const Right = () => {
     const storedToken = localStorage.getItem("token");
     if (storedToken) {
       setAuthenticated(true);
-
       axios
         .get("http://localhost:5000/userData", {
           headers: {
@@ -19,13 +18,20 @@ export const Right = () => {
           },
         })
         .then((response) => {
-          setUserData(response.data.data);
+          setUserData(response.data);
         })
         .catch((error) => {
           console.error(error);
         });
     }
   }, [storedToken]);
+
+  let userDataObject;
+  if (userData && typeof userData === 'string') {
+    userDataObject = JSON.parse(userData);
+  } else {
+    userDataObject = userData;
+  }
 
   return (
     <div className="rounded-lg p-8">
@@ -40,10 +46,10 @@ export const Right = () => {
               className="mb-3 rounded-full shadow-lg"
             />
             <h5 className="mb-1 text-xl font-medium text-gray-900 dark:text-white">
-              {userData ? userData.fullname : ""}
+              {userDataObject && userDataObject.data && userDataObject.data.fullname ? userDataObject.data.fullname : ""}
             </h5>
             <span className="text-sm text-gray-500 dark:text-gray-400">
-              {userData ? userData.email : ""}
+              {userDataObject && userDataObject.data && userDataObject.data.email ? userDataObject.data.email : ""}
             </span>
             <div className="mt-4 flex space-x-3 lg:mt-6">
               <a

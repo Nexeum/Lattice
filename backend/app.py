@@ -1,26 +1,38 @@
-import jwt, datetime
-from flask import Flask, jsonify, request
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import OAuth2PasswordBearer
+from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
-from flask_cors import CORS, cross_origin
-import hashlib
 from bson.objectid import ObjectId
 from bson import json_util
+import jwt, datetime
+import hashlib
+from pymongo.errors import ConnectionFailure
+from fastapi import Body
 
-# Instantiation of Flask
-app = Flask(__name__)
+
+# Instantiation of FastAPI
+app = FastAPI()
 
 # Settings CORS (Cross-Origin Resource Sharing)
-CORS(app)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Secret key for JWT
 SECRET_KEY = "kubehub"
 
 # Database
 client = MongoClient('mongodb://localhost:27017/')
-db = client.kubehub
+db = client['kubehub']
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # JWT
-def generate_token(user_id):
+def generate_token(user_id: str):
     try:
         payload = {
             'user_id': user_id,
@@ -29,67 +41,45 @@ def generate_token(user_id):
         token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
         return token
     except Exception as e:
-        return jsonify({'error': 'Token generation failed', 'message': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Middleware de autenticación
-def verify_token(token):
+def verify_token(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
         return payload
     except jwt.ExpiredSignatureError:
-        raise Exception('Token expired')
+        raise HTTPException(status_code=401, detail='Token expired')
     except jwt.InvalidTokenError:
-        raise Exception('Invalid token')
-
-# Routes
-@app.route('/login', methods=['POST'])
-@cross_origin()
-def login():
-    try:
-        data = request.get_json()
-        email = data.get('email')
-        password = data.get('password')
-
-        if not email or not password:
-            return jsonify({'error': 'Invalid request', 'message': 'Email and password are required'}), 400
-
-        hashed_password = hashlib.sha1(hashlib.md5(password.encode()).digest()).hexdigest()
-
-        user = db.user.find_one({"email": email, "password": hashed_password})
-
-        if user:
-            user_id = str(user['_id'])
-            token = generate_token(user_id)
-            return jsonify({'message': 'Login successful', 'token': token})
-        else:
-            return jsonify({'error': 'Invalid credentials', 'message': 'Invalid email or password'}), 401
-    except Exception as e:
-        return jsonify({'error': 'Login failed', 'message': str(e)}), 500
+        raise HTTPException(status_code=401, detail='Invalid token')
     
-@app.route('/userData', methods=['GET'])
-@cross_origin()
-def get_user_data():
-    try:
-        token = request.headers.get('Authorization')
+# Routes
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
 
-        if token.startswith('Bearer '):
-            token = token.split(' ')[1]
-            
-        try:
-            payload = verify_token(token)
-            user_id = payload['user_id']
-        except Exception as e:
-            return jsonify({'error': str(e), 'message': 'Log in again'}), 401
+@app.post("/login")
+async def login(email: str = Body(...), password: str = Body(...)):
+    if not email or not password:
+        raise HTTPException(status_code=400, detail='Email and password are required')
 
-        user = db.user.find_one({"_id": ObjectId(user_id)})
+    hashed_password = hashlib.sha1(hashlib.md5(password.encode()).digest()).hexdigest()
 
-        if user:
-            return json_util.dumps({'data': user})
-        else:
-            return jsonify({'error': 'User not found', 'message': 'User not found'}), 404
+    user = db.user.find_one({"email": email, "password": hashed_password})
 
-    except Exception as e:
-        return jsonify({'error': 'User data failed', 'message': str(e)}), 500
+    if user:
+        user_id = str(user['_id'])
+        token = generate_token(user_id)
+        return {'token': token}
+    else:
+        raise HTTPException(status_code=401, detail='Invalid email or password')
 
-if __name__ == "__main__":
-    app.run(debug=True)
+@app.get("/userData")
+async def get_user_data(payload: dict = Depends(verify_token)):
+    user_id = payload['user_id']
+
+    user = db.user.find_one({"_id": ObjectId(user_id)})
+
+    if user:
+        return json_util.dumps({'data': user})
+    else:
+        raise HTTPException(status_code=404, detail='User not found')

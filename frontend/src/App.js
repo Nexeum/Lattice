@@ -7,10 +7,11 @@ import { Register } from "./components/Register";
 import { Dashboard } from "./components/Dashboard";
 import { NavbarRC } from "./components/Navbar";
 import { Right } from "./components/Right";
-import { KubeFlow } from "./components/KubeFlow";
-import { KubeSh } from "./components/KubeSh";
-import { Kubeia } from "./components/Kubeia";
+import { Statify } from "./components/Statify";
+import { Containex } from "./components/Containex";
+import { Kub } from "./components/Kub";
 import { ContainerDetails } from "./components/ContainerDetails";
+import { Room } from "./components/room";
 
 import "./App.css";
 
@@ -38,7 +39,8 @@ const Auth = ({ onAuthenticate }) => {
     try {
       const response = await axios.post(
         "http://localhost:5000/login",
-        credentials
+        credentials,
+        { headers: { 'Content-Type': 'application/json' } }
       );
       if (response.data.token) {
         localStorage.setItem("token", response.data.token);
@@ -119,26 +121,32 @@ function App() {
                   />
                   <ProtectedRoute
                     exact
-                    path="/kubesh"
-                    component={KubeSh}
+                    path="/containex"
+                    component={Containex}
                     authenticated={authenticated}
                   />
                   <ProtectedRoute
                     exact
-                    path="/kubeflow"
-                    component={KubeFlow}
+                    path="/statify"
+                    component={Statify}
                     authenticated={authenticated}
                   />
                   <ProtectedRoute
                     exact
-                    path="/kubeia"
-                    component={Kubeia}
+                    path="/kub"
+                    component={Kub}
                     authenticated={authenticated}
                   />
                   <ProtectedRoute
                     exact
                     path="/container/:id"
                     component={ContainerDetails}
+                    authenticated={authenticated}
+                  />
+                  <ProtectedRoute
+                    exact
+                    path="/room/:id"
+                    component={Room}
                     authenticated={authenticated}
                   />
                 </Switch>
