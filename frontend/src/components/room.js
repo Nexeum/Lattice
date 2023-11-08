@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Card, Button, Modal, TextInput, Label, Textarea, Spinner, Table } from "flowbite-react";
+import { Card, Button, Modal, TextInput, Label, Badge, Spinner, Table } from "flowbite-react";
 import { useParams } from 'react-router-dom';
 import { Cli } from './Cli';
 
@@ -12,7 +12,6 @@ export const Room = () => {
   const [containerName, setContainerName] = useState('');
   const [containerImage, setContainerImage] = useState('');
   const [containerShell, setContainerShell] = useState('');
-  const [containerCreationOutput, setContainerCreationOutput] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [containers, setContainers] = useState([]);
@@ -74,10 +73,8 @@ export const Room = () => {
         </div>
 
         <div className="flex space-x-4">
-          <Card className="space-y-4 flex-grow">
+          <div className="flex w-full">
             <Cli />
-          </Card>
-          <Card className="flex-grow-3">
             <Table>
               <Table.Head>
                 <Table.HeadCell>ID</Table.HeadCell>
@@ -94,15 +91,20 @@ export const Room = () => {
                     </Table.Cell>
                     <Table.Cell>{container.Name}</Table.Cell>
                     <Table.Cell>{container.Image}</Table.Cell>
-                    <Table.Cell>{container.Status}</Table.Cell>
+                    <Table.Cell>
+                      {container.Status === 'running' ? (
+                        <Badge color="success">Running</Badge>
+                      ) : (
+                        <Badge color="failure">Exited</Badge>
+                      )}
+                    </Table.Cell>
                     <Table.Cell>{container.IP}</Table.Cell>
                   </Table.Row>
                 ))}
               </Table.Body>
             </Table>
-          </Card>
+          </div>
         </div>
-        <Textarea value={containerCreationOutput} readOnly />
       </Card>
       <Modal show={openModalCreate} onClose={() => setOpenModalCreate(false)}>
         <Modal.Header>Create a Container</Modal.Header>

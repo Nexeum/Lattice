@@ -6,7 +6,6 @@ from bson.objectid import ObjectId
 from bson import json_util
 import jwt, datetime
 import hashlib
-from pymongo.errors import ConnectionFailure
 from fastapi import Body
 
 

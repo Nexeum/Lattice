@@ -2,7 +2,7 @@ import subprocess
 import json
 from fastapi import FastAPI, HTTPException
 from starlette.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException
 import docker
 import requests
 import time
@@ -33,7 +33,7 @@ def get_average_response_time(ip):
     response_times = []
     for _ in range(100):
         start_time = time.time()
-        response = requests.get(f'http://{ip}/get')
+        response = requests.get(f'http://{ip}')
         response_time = time.time() - start_time
         response_times.append(response_time)
 
@@ -45,13 +45,21 @@ def get_qps(ip):
     start_time = time.time()
 
     for _ in range(num_requests):
-        response = requests.get(f'http://{ip}/get')
+        response = requests.get(f'http://{ip}')
 
     end_time = time.time()
     elapsed_time = end_time - start_time
 
     qps = num_requests / elapsed_time
     return qps
+
+@app.post("/exe")
+async def execute_command(command: str):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, shell=True)
+    output, error = process.communicate()
+    if error:
+        return {"error": error.decode()}
+    return {"output": output.decode()}
 
 @app.post("/containermain/{id}")
 async def create_container_main(id: str):
@@ -123,9 +131,16 @@ async def create_container(container_id: str, name: str, image: str, shell: str)
 @app.get("/container/{id}/aprox")
 async def read_metrics(id: str):
     try:
-        ip = get_container_ip(id)
-        average_response_time = await get_average_response_time(ip)
-        qps = await get_qps(ip)
+        container = client.containers.get(id)
+        ports = container.attrs['NetworkSettings']['Ports']
+        if not ports:
+            ip = get_container_ip(id)
+        else:
+            port_mapping = next(iter(ports.values()))[0]
+            port = port_mapping['HostPort']
+            ip = f"localhost:{port}"
+        average_response_time = get_average_response_time(ip)
+        qps = get_qps(ip)
 
         return {
             "averageResponseTime": average_response_time,

@@ -1,0 +1,3 @@
+Enter email: Terminate batch job (Y/N)? 
+Enter password: Terminate batch job (Y/N)? 
+Enter package id: Terminate batch job (Y/N)? 

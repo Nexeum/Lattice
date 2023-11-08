@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { BrowserRouter as Router, Switch, Route, Redirect } from "react-router-dom";
 import { Button, Label, TextInput, Card } from "flowbite-react";
-
+import { useHistory } from "react-router-dom";
 import { Register } from "./components/Register";
 import { Dashboard } from "./components/Dashboard";
 import { NavbarRC } from "./components/Navbar";
@@ -12,6 +12,7 @@ import { Nodesly } from "./components/Nodesly";
 import { Tars } from "./components/Tars";
 import { ContainerDetails } from "./components/ContainerDetails";
 import { Room } from "./components/room";
+import { Package } from "./components/Package";
 
 import "./App.css";
 
@@ -55,7 +56,7 @@ const Auth = ({ onAuthenticate }) => {
   return (
     <div className="flex justify-center items-center h-screen">
       <div className="vh-100 d-flex align-items-center justify-content-center">
-        <Card className="p-5 shadow-lg" style={{ maxWidth: "400px" }}>
+        <Card className="p-5 shadow-lg">
           <form onSubmit={handleSubmit}>
             <Label htmlFor="email">Email Address</Label>
             <TextInput
@@ -105,7 +106,7 @@ function App() {
   const [authenticated, setAuthenticated] = useAuthentication();
 
   return (
-    <div className="bg-black">
+    <div>
       <Router>
         {authenticated ? (
           <>
@@ -147,6 +148,12 @@ function App() {
                     exact
                     path="/room/:id"
                     component={Room}
+                    authenticated={authenticated}
+                  />
+                  <ProtectedRoute
+                    exact
+                    path="/package/:id"
+                    component={Package}
                     authenticated={authenticated}
                   />
                 </Switch>
