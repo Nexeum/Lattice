@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { Card, Button, TextInput } from "flowbite-react";
 
-export const Kub = () => {
+export const Tars = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [suggestions, setSuggestions] = useState([
@@ -27,7 +27,7 @@ export const Kub = () => {
       ...prevMessages,
       { text: suggestion, sender: "user" },
     ]);
-    setSuggestions([]); // Vacía las sugerencias
+    setSuggestions([]);
   }, []);
 
   return (

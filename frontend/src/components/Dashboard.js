@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from "react";
-import axios from "axios";
-import { Link } from "react-router-dom";
-import { Table} from "flowbite-react";
+import { Table, Card, Button } from "flowbite-react";
 
 export const Dashboard = () => {
   const [authenticated, setAuthenticated] = useState(false);
@@ -14,31 +12,15 @@ export const Dashboard = () => {
   }, []);
 
   return (
-    <div className="rounded-lg p-8">
-      <div className="relative overflow-x-auto">
+    <div className="flex flex-col p-8">
+      <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
+            Trending Add-Ons
+          </h2>
+          <Button>Create Add-Ons</Button>
+        </div>
         <Table hoverable>
-          <Table.Head>
-            <Table.HeadCell>
-              <div className="flex items-center space-x-2">
-                <svg
-                  className="w-6 h-6 text-gray-800 dark:text-white"
-                  aria-hidden="true"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 18 16"
-                >
-                  <path
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M1 1v14h16m0-9-3-2-3 5-3-2-3 4"
-                  />
-                </svg>
-                <span>Trending repositories</span>
-              </div>
-            </Table.HeadCell>
-          </Table.Head>
           <Table.Body className="divide-y">
             <Table.Row className="bg-white dark:border-gray-700 dark:bg-gray-800">
               <Table.Cell>
@@ -55,7 +37,7 @@ export const Dashboard = () => {
             </Table.Row>
           </Table.Body>
         </Table>
-      </div>
-    </div>
+      </Card >
+    </div >
   );
 };

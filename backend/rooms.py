@@ -29,7 +29,6 @@ async def get_rooms():
 
 @app.post("/rooms")
 async def create_room(room: dict):
-    print("here")
     result = collection.insert_one(room)
     room["_id"] = str(result.inserted_id)
     return room

@@ -83,3 +83,9 @@ async def get_user_data(payload: dict = Depends(verify_token)):
         return json_util.dumps({'data': user})
     else:
         raise HTTPException(status_code=404, detail='User not found')
+    
+@app.get("/getuserid")
+async def get_user_id(payload: dict = Depends(verify_token)):
+    user_id = payload['user_id']
+
+    return json_util.dumps({'data': user_id})

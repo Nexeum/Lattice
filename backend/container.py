@@ -4,6 +4,8 @@ from fastapi import FastAPI, HTTPException
 from starlette.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, WebSocket
 import docker
+import requests
+import time
 
 client = docker.from_env()
 
@@ -21,6 +23,35 @@ def restart_docker_service(container):
     exec_id = container.exec_run("sh -c 'service docker stop'", privileged=True)
     exec_id = container.exec_run("sh -c 'service docker start'", privileged=True)
     return exec_id.output.decode("utf-8")
+
+def get_container_ip(id):
+    client = docker.from_env()
+    container = client.containers.get(id)
+    return container.attrs['NetworkSettings']['IPAddress']
+
+def get_average_response_time(ip):
+    response_times = []
+    for _ in range(100):
+        start_time = time.time()
+        response = requests.get(f'http://{ip}/get')
+        response_time = time.time() - start_time
+        response_times.append(response_time)
+
+    average_response_time = sum(response_times) / len(response_times)
+    return average_response_time
+
+def get_qps(ip):
+    num_requests = 100
+    start_time = time.time()
+
+    for _ in range(num_requests):
+        response = requests.get(f'http://{ip}/get')
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
+    qps = num_requests / elapsed_time
+    return qps
 
 @app.post("/containermain/{id}")
 async def create_container_main(id: str):
@@ -88,3 +119,17 @@ async def create_container(container_id: str, name: str, image: str, shell: str)
     container = client.containers.get(container_id)
     exec_id = container.exec_run(f"sh -c 'docker run -dit --privileged --name {name} {image} {shell}'", privileged=True)
     return {"output": exec_id.output.decode("utf-8")}
+
+@app.get("/container/{id}/aprox")
+async def read_metrics(id: str):
+    try:
+        ip = get_container_ip(id)
+        average_response_time = await get_average_response_time(ip)
+        qps = await get_qps(ip)
+
+        return {
+            "averageResponseTime": average_response_time,
+            "qps": qps
+        }
+    except Exception as e:
+        return {"error": str(e)}

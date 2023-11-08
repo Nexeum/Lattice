@@ -6,9 +6,9 @@ export const NavbarRC = () => {
   const location = useLocation();
   const navLinks = [
     { to: "/", label: "Home" },
-    { to: "/containex", label: "Containex" },
+    { to: "/nodesly", label: "Nodesly" },
     { to: "/statify", label: "Statify" },
-    { to: "/kub", label: "Kub" },
+    { to: "/tars", label: "Tars" },
   ];
 
   return (
@@ -17,10 +17,10 @@ export const NavbarRC = () => {
         <img
           src="https://cdn-icons-png.flaticon.com/128/1344/1344707.png"
           className="mr-3 h-6 sm:h-9"
-          alt="Logo de Flowbite React que representa a KubeHub"
+          alt="Innoxus"
         />
         <span className="self-center whitespace-nowrap text-xl font-semibold dark:text-white">
-          KubeHub
+          Innoxus
         </span>
       </Navbar.Brand>
       <div className="flex md:order-2">

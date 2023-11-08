@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Card, Button, Modal, TextInput, Label, Select } from "flowbite-react";
 import axios from 'axios';
-import { Link, useHistory } from "react-router-dom";
+import { useHistory } from "react-router-dom";
 
 export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJoin }) => {
   const handleStateChange = () => {
@@ -32,7 +32,7 @@ export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJo
   );
 };
 
-export const Containex = () => {
+export const Nodesly = () => {
   const [rooms, setRooms] = useState([]);
   const [openModal, setOpenModal] = useState(false);
   const [passwordModal, setPasswordModal] = useState(false);

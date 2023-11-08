@@ -8,8 +8,8 @@ import { Dashboard } from "./components/Dashboard";
 import { NavbarRC } from "./components/Navbar";
 import { Right } from "./components/Right";
 import { Statify } from "./components/Statify";
-import { Containex } from "./components/Containex";
-import { Kub } from "./components/Kub";
+import { Nodesly } from "./components/Nodesly";
+import { Tars } from "./components/Tars";
 import { ContainerDetails } from "./components/ContainerDetails";
 import { Room } from "./components/room";
 
@@ -121,8 +121,8 @@ function App() {
                   />
                   <ProtectedRoute
                     exact
-                    path="/containex"
-                    component={Containex}
+                    path="/nodesly"
+                    component={Nodesly}
                     authenticated={authenticated}
                   />
                   <ProtectedRoute
@@ -133,8 +133,8 @@ function App() {
                   />
                   <ProtectedRoute
                     exact
-                    path="/kub"
-                    component={Kub}
+                    path="/tars"
+                    component={Tars}
                     authenticated={authenticated}
                   />
                   <ProtectedRoute
