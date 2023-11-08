@@ -7,7 +7,7 @@ set /p id="Enter package id: "
 if not exist .innoxus mkdir .innoxus
 
 :: Login and get token
-for /f "tokens=2 delims=: " %%a in ('curl -s -X POST -H "Content-Type: application/json" -d "{\"email\":\"%email%\",\"password\":\"%password%\"}" http://localhost:5000/login') do set "token=%%~a"
+for /f "tokens=2 delims=: " %%a in ('curl -X POST -H "Content-Type: application/json" -d "{\"email\":\"%email%\",\"password\":\"%password%\"}" http://localhost:5000/login') do set "token=%%~a"
 
 :: Remove quotes from token
 set token=%token:"=%

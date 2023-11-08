@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Table, Card, Button, Modal, Label, TextInput } from "flowbite-react";
 import { useHistory } from "react-router-dom";
+import axios from 'axios';
 
 export const Dashboard = () => {
   const [openModal, setOpenModal] = useState(false);
@@ -10,35 +11,28 @@ export const Dashboard = () => {
 
   useEffect(() => {
     const fetchPackages = async () => {
-      const response = await fetch('http://localhost:5003/packages');
-      const data = await response.json();
-      setPackages(data);
+      const response = await axios.get('http://localhost:5003/packages');
+      setPackages(response.data);
     };
     fetchPackages();
   }, []);
-
+  
   const history = useHistory();
-
+  
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const response = await fetch('http://localhost:5003/packages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name: packageName,
-        description: description,
-        language: "Not Recognized",
-        stars: 0
-      })
+    const response = await axios.post('http://localhost:5003/packages', {
+      name: packageName,
+      description: description,
+      language: "Not Recognized",
+      stars: 0
     });
-    const data = await response.json();
+    const data = response.data;
     console.log(data);
     setOpenModal(false);
     setPackageName("");
     setDescription("");
-    history.push(`/package/${data._id}`);  // Navigate to the new package's page
+    history.push(`/package/${data._id}`);
   }
 
   return (

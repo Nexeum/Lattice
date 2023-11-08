@@ -4,6 +4,7 @@ import { Card, Button, TextInput } from "flowbite-react";
 export const Tars = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [messageSent, setMessageSent] = useState(false);
   const [suggestions, setSuggestions] = useState([
     "How do I install Docker?",
     "How do I create a pod in Kubernetes?",
@@ -19,6 +20,7 @@ export const Tars = () => {
       ]);
       setInput("");
       setSuggestions([]);
+      setMessageSent(true);
     }
   }, [input]);
 
@@ -32,8 +34,8 @@ export const Tars = () => {
 
   return (
     <div className="flex flex-col p-8">
-      <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800">
-        <div className="d-flex flex-col h-100">
+      <Card className={`w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800 ${messageSent ? '' : 'card-with-watermark'} relative`}>
+        <div className="d-flex flex-col h-100 z-10 relative">
           <div className="overflow-auto mb-3">
             {messages.map((message, index) => (
               <div
@@ -52,7 +54,7 @@ export const Tars = () => {
               </div>
             ))}
           </div>
-          <div className="grid grid-cols-2 gap-4 mb-4">
+          <div className="grid grid-cols-2 gap-4 mb-4 mt-96">
             {suggestions.map((suggestion, index) => (
               <Card
                 key={index}
