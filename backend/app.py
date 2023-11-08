@@ -56,6 +56,7 @@ def verify_token(token: str = Depends(oauth2_scheme)):
 async def root():
     return {"message": "Hello World"}
 
+
 @app.post("/login")
 async def login(email: str = Body(...), password: str = Body(...)):
     if not email or not password:
@@ -71,6 +72,22 @@ async def login(email: str = Body(...), password: str = Body(...)):
         return {'token': token}
     else:
         raise HTTPException(status_code=401, detail='Invalid email or password')
+
+@app.post("/register")
+async def register(email: str = Body(...), password: str = Body(...)):
+    if not email or not password:
+        raise HTTPException(status_code=400, detail='Email and password are required')
+
+    existing_user = db.user.find_one({"email": email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail='Email already registered')
+
+    hashed_password = hashlib.sha1(hashlib.md5(password.encode()).digest()).hexdigest()
+
+    new_user = {"email": email, "password": hashed_password}
+    db.user.insert_one(new_user)
+
+    return {"message": "User registered successfully"}
 
 @app.get("/userData")
 async def get_user_data(payload: dict = Depends(verify_token)):

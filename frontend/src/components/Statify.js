@@ -45,23 +45,23 @@ export const Statify = () => {
 
   return (
     <div className="flex flex-col p-8">
-      <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800">
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
+      <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800 p-6">
+        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white mb-4">
           Local Containers
         </h2>
-        <p className="text-gray-500 dark:text-gray-400">
+        <p className="text-gray-500 dark:text-gray-400 mb-4">
           Click the button below to fetch the local containers.
         </p>
         <Button
           onClick={handleScan}
           color="light"
-          className="flex items-center space-x-2"
+          className="flex items-center space-x-2 mb-4"
         >
           {loading ? <Spinner /> : "Get containers"}
         </Button>
-        {error && <p>{error}</p>}
+        {error && <p className="text-red-500 mb-4">{error}</p>}
         {showTable && (
-          <Table hoverable className="mt-4">
+          <Table hoverable className="mt-4 divide-y divide-gray-200">
             <Table.Head>
               <Table.HeadCell>Name</Table.HeadCell>
               <Table.HeadCell>IP</Table.HeadCell>
@@ -69,7 +69,7 @@ export const Statify = () => {
               <Table.HeadCell>Status</Table.HeadCell>
               <Table.HeadCell>Actions</Table.HeadCell>
             </Table.Head>
-            <Table.Body className="divide-y">
+            <Table.Body>
               {containers.map((container) => (
                 <Table.Row key={container.ID}>
                   <Table.Cell>{container.Names}</Table.Cell>
@@ -81,9 +81,11 @@ export const Statify = () => {
                     </Badge>
                   </Table.Cell>
                   <Table.Cell>
-                    <Link to={`/container/${container.ID}`}>
-                      <Button color="light">Ver</Button>
-                    </Link>
+                    {container.Port && container.Port !== "N/A" && (
+                      <Link to={`/container/${container.ID}`}>
+                        <Button color="light">View</Button>
+                      </Link>
+                    )}
                   </Table.Cell>
                 </Table.Row>
               ))}

@@ -2,7 +2,8 @@ import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { BrowserRouter as Router, Switch, Route, Redirect } from "react-router-dom";
 import { Button, Label, TextInput, Card } from "flowbite-react";
-import { useHistory } from "react-router-dom";
+import { Link } from "react-router-dom";
+
 import { Register } from "./components/Register";
 import { Dashboard } from "./components/Dashboard";
 import { NavbarRC } from "./components/Navbar";
@@ -57,6 +58,9 @@ const Auth = ({ onAuthenticate }) => {
     <div className="flex justify-center items-center h-screen">
       <div className="vh-100 d-flex align-items-center justify-content-center">
         <Card className="p-5 shadow-lg">
+          <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
+            Login
+          </h1>
           <form onSubmit={handleSubmit}>
             <Label htmlFor="email">Email Address</Label>
             <TextInput
@@ -82,6 +86,9 @@ const Auth = ({ onAuthenticate }) => {
             />
             {error && <p>{error}</p>}
             <Button type="submit">Log In</Button>
+            <div className="mt-3 text-white">
+              <Link to="/register">Don't have an account? Register</Link>
+            </div>
           </form>
         </Card>
       </div>

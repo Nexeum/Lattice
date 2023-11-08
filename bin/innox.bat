@@ -1,18 +1,24 @@
 @echo off
-set /p email="Enter email: "
-set /p password="Enter password: "
+set configFile=.innoxus\config.bat
+
+if exist %configFile% (
+    call %configFile%
+) else (
+    set /p email="Enter email: "
+    set /p password="Enter password: "
+
+    echo set email=%email% > %configFile%
+    echo set password=%password% >> %configFile%
+)
+
 set /p id="Enter package id: "
 
-:: Create .innoxus directory
 if not exist .innoxus mkdir .innoxus
 
-:: Login and get token
 for /f "tokens=2 delims=: " %%a in ('curl -X POST -H "Content-Type: application/json" -d "{\"email\":\"%email%\",\"password\":\"%password%\"}" http://localhost:5000/login') do set "token=%%~a"
 
-:: Remove quotes from token
 set token=%token:"=%
 
-:: Check if login was successful
 if not "%token%"=="" (
     echo Login successful
 ) else (
