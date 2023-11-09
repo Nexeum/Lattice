@@ -23,39 +23,38 @@ export const Room = () => {
         setRoom(response.data);
       })
       .catch(error => {
-        console.log(error);
+        console.error(error);
       });
 
     setLoading(true);
     axios.post(`http://localhost:5001/containermain/${id}`)
       .then(response => {
-        console.log(response.data.message);
         setLoading(false);
         setSuccess(true);
       })
       .catch(error => {
-        console.log(error);
+        console.error(error);
         setLoading(false);
       });
 
     axios.get(`http://localhost:5001/containers/${id}/ps`)
       .then(function (response) {
-        console.log(response.data.output);
+        console.error(response.data.output);
         setContainers(response.data.output);
       })
       .catch(function (error) {
-        console.log(error);
+        console.error(error);
       });
   }, [id]);
 
   const createContainer = () => {
     axios.get(`http://localhost:5001/container/${id}/${containerName}/${containerImage}/${containerShell}`)
       .then(function (response) {
-        console.log(response.data);
+        console.error(response.data);
         setCreationResult("Container created successfully with output: " + response.data.output);
       })
       .catch(function (error) {
-        console.log(error);
+        console.error(error);
         setCreationResult("Failed to create container: " + error.message);
       });
   }

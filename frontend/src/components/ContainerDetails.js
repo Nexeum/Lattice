@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axios from "axios";
-import { Card, Button, Spinner } from "flowbite-react";
+import { Card, Button, Modal } from "flowbite-react";
 import { useParams } from 'react-router-dom';
 import { Bar, Line, Doughnut } from 'react-chartjs-2';
 import { Chart, registerables } from 'chart.js';
@@ -14,11 +14,13 @@ export const ContainerDetails = () => {
   const [memPerc, setMemPerc] = useState(0);
   const [timestamps, setTimestamps] = useState([]);
   const [concurrentClients, setConcurrentClients] = useState(0);
-  const [averageResponseTime, setAverageResponseTime] = useState(0); // in seconds
-  const [qps, setQps] = useState(0); // queries per second
+  const [averageResponseTime, setAverageResponseTime] = useState(0);
+  const [qps, setQps] = useState(0);
+  const [showModal, setShowModal] = useState(false);
+  const [overloadData, setOverloadData] = useState({});
 
   const startLoadTest = () => {
-
+    setShowModal(true);
   };
 
   useEffect(() => {
@@ -37,10 +39,10 @@ export const ContainerDetails = () => {
           });
         })
         .catch(error => {
-          console.log(error);
+          console.error(error);
         });
     }, 5000);
-  
+
     return () => {
       clearInterval(intervalId);
     };
@@ -52,12 +54,13 @@ export const ContainerDetails = () => {
 
     axios.get(`http://localhost:5001/container/${id}/aprox`)
       .then(response => {
-        console.log(response.data);
-        setAverageResponseTime(response.data.averageResponseTime);
-        setQps(response.data.qps);
+        const roundedAverageResponseTime = Math.round(response.data.averageResponseTime * 100) / 100;
+        const roundedQps = Math.round(response.data.qps);
+        setAverageResponseTime(roundedAverageResponseTime);
+        setQps(roundedQps);
       })
       .catch(error => {
-        console.log(error);
+        console.error(error);
       });
   }, [id, qps, averageResponseTime]);
 
@@ -115,13 +118,26 @@ export const ContainerDetails = () => {
     }
   };
 
+  const dataOverload = {
+    labels: ['p99', 'p95', 'p90', 'mean', 'max', 'min'],
+    datasets: [
+      {
+        label: 'Overload',
+        data: Object.values(overloadData),
+        fill: false,
+        borderColor: 'rgb(75, 192, 192)',
+        tension: 0.1
+      },
+    ],
+  };
+
   return (
     <div className="flex flex-col p-8">
       <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800">
         <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
           Metrics Container {id}
         </h2>
-  
+
         <div className="flex flex-col md:flex-row flex-wrap space-x-4 w-full">
           <Card className="flex-grow space-y-4 rounded-xl shadow-md dark:bg-gray-800">
             <Bar data={dataMemUsage} options={options} />
@@ -134,8 +150,11 @@ export const ContainerDetails = () => {
           </Card>
         </div>
         <div className="w-full">
+          <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white mb-4">
+            Performance Test Aprox
+          </h1>
           <Card className="flex-grow space-y-4 rounded-xl shadow-md dark:bg-gray-800">
-          <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
+            <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
               Concurrent Clients: {concurrentClients}
             </h3>
             <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
@@ -147,6 +166,15 @@ export const ContainerDetails = () => {
             <Button onClick={startLoadTest}>Start Load Test</Button>
           </Card>
         </div>
+        <Modal isOpen={showModal} onClose={() => setShowModal(false)}>
+          <Modal.Header>Overload Data</Modal.Header>
+          <Modal.Body>
+            <Line data={dataOverload} options={options} />
+          </Modal.Body>
+          <Modal.Footer>
+            <Button color="red" onClick={() => setShowModal(false)}>Close</Button>
+          </Modal.Footer>
+        </Modal>
       </Card>
     </div>
   );

@@ -13,6 +13,7 @@ export const Dashboard = () => {
     const fetchPackages = async () => {
       const response = await axios.get('http://localhost:5003/packages');
       setPackages(response.data);
+      const token = localStorage.getItem("token");
     };
     fetchPackages();
   }, []);
@@ -21,19 +22,35 @@ export const Dashboard = () => {
   
   const handleSubmit = async (e) => {
     e.preventDefault();
+    const token = localStorage.getItem("token");
+    const userId = await getUserId(token);
     const response = await axios.post('http://localhost:5003/packages', {
       name: packageName,
       description: description,
       language: "Not Recognized",
-      stars: 0
+      stars: 0,
+      owner: userId
     });
     const data = response.data;
-    console.log(data);
     setOpenModal(false);
     setPackageName("");
     setDescription("");
     history.push(`/package/${data._id}`);
   }
+
+  const getUserId = async (token) => {
+    try {
+      const response = await axios.get("http://localhost:5000/getuserid", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      return JSON.parse(response.data).data;
+    } catch (error) {
+      console.error(error);
+      return null;
+    }
+  };
 
   return (
     <div className="flex flex-col p-8">

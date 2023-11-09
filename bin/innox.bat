@@ -26,10 +26,12 @@ if not "%token%"=="" (
     exit /b
 )
 
-:: Upload files
+:: Upload 
 for %%G in (*.*) do (
     if not "%%~nxG"==".innoxus" (
-        echo Uploading %%G...
-        curl -X POST -H "Content-Type: multipart/form-data" -F "file=@%%G" http://localhost:5003/packages/%id%/files
+        if not "%%~nxG"=="innox.bat" (
+            echo Uploading %%G...
+            curl -X POST -H "Content-Type: multipart/form-data" -F "file=@%%G" http://localhost:5003/packages/%id%/files
+        )
     )
 )

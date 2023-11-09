@@ -3,7 +3,7 @@ import { Card, Button, Modal, TextInput, Label, Select } from "flowbite-react";
 import axios from 'axios';
 import { useHistory } from "react-router-dom";
 
-export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJoin }) => {
+export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJoin, owner, currentUserId }) => {
   const handleStateChange = () => {
     onStateChange(roomName);
   };
@@ -24,9 +24,11 @@ export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJo
         <Button onClick={handleJoin} className="mt-auto m-4">
           Join
         </Button>
-        <Button onClick={handleStateChange} className="mt-auto m-4">
-          Change to {isPublic ? "Private" : "Public"}
-        </Button>
+        {currentUserId === owner && (
+          <Button onClick={handleStateChange} className="mt-auto m-4">
+            Change to {isPublic ? "Private" : "Public"}
+          </Button>
+        )}
       </div>
     </Card>
   );
@@ -40,33 +42,68 @@ export const Nodesly = () => {
   const [isPrivate, setIsPrivate] = useState('public');
   const [password, setPassword] = useState('');
   const [joinRoomId, setJoinRoomId] = useState(null);
+  const [currentUserId, setCurrentUserId] = useState(null);
   const history = useHistory();
 
   useEffect(() => {
     axios.get('http://localhost:5002/rooms')
       .then(response => {
-        console.log(response.data);
         setRooms(response.data);
       })
       .catch(error => {
         console.error('There was an error!', error);
       });
+
+      const fetchUserId = async () => {
+        const token = localStorage.getItem("token");
+        const userId = await getUserId(token);
+        setCurrentUserId(userId);
+      };
+  
+      fetchUserId();
   }, []);
 
-  const handleCreateRoom = () => {
-    const room = {
-      name: roomName,
-      is_private: isPrivate === 'private',
-      password: password
-    };
-    axios.post('http://localhost:5002/rooms', room)
-      .then(response => {
-        setRooms([...rooms, response.data]);
-        setOpenModal(false);
-      })
-      .catch(error => {
-        console.error('There was an error!', error);
+  const getUserId = async (token) => {
+    try {
+      const response = await axios.get("http://localhost:5000/getuserid", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       });
+      return JSON.parse(response.data).data;
+    } catch (error) {
+      console.error(error);
+      return null;
+    }
+  };
+
+  const createRoom = async (room) => {
+    try {
+      const response = await axios.post('http://localhost:5002/rooms', room);
+      return response.data;
+    } catch (error) {
+      console.error('There was an error!', error);
+      return null;
+    }
+  };
+
+  const handleCreateRoom = async () => {
+    if (token) {
+      const userId = await getUserId(token);
+      if (userId) {
+        const room = {
+          name: roomName,
+          is_private: isPrivate === 'private',
+          password: password,
+          owner: userId
+        };
+        const newRoom = await createRoom(room);
+        if (newRoom) {
+          setRooms([...rooms, newRoom]);
+          setOpenModal(false);
+        }
+      }
+    }
   };
 
   const handleJoinRoom = (roomId, isPublic) => {
@@ -103,6 +140,8 @@ export const Nodesly = () => {
               roomId={room._id}
               roomName={room.name}
               isPublic={!room.is_private}
+              owner = {room.owner}
+              currentUserId={currentUserId}
               onJoin={() => handleJoinRoom(room._id, !room.is_private)}
             />
           )) : <p className="text-white">No rooms available. Create one?</p>}
