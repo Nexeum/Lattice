@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Card, TextInput } from "flowbite-react";
+import { Button, TextInput } from "flowbite-react";
 import axios from 'axios';
 
 export const Cli = () => {
@@ -14,9 +14,7 @@ export const Cli = () => {
   const handleCommandSubmit = async (event) => {
     event.preventDefault();
     const response = await axios.post(
-      "http://localhost:5001/exe",
-      { command: input },
-      { headers: { 'Content-Type': 'application/json' } }
+      `http://localhost:5001/exe/${encodeURIComponent(input)}`
     );
     setOutput(response.data.output);
     setInput("");
@@ -33,12 +31,17 @@ export const Cli = () => {
         <div ref={outputEndRef}></div>
       </div>
       <form onSubmit={handleCommandSubmit}>
-        <TextInput
-          type="text"
-          value={input}
-          onChange={handleInputChange}
-          className="w-full bg-black text-white"
-        />
+        <div className="flex">
+          <TextInput
+            type="text"
+            value={input}
+            onChange={handleInputChange}
+            className="w-full bg-black text-white"
+          />
+          <Button type="submit" className="ml-2">
+            Execute
+          </Button>
+        </div>
       </form>
     </div>
   );

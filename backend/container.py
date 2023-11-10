@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 import docker
 import requests
 import time
+import shlex
 
 client = docker.from_env()
 
@@ -53,14 +54,16 @@ def get_qps(ip):
     qps = num_requests / elapsed_time
     return qps
 
-@app.post("/exe")
+@app.post('/exe/{command}')
 async def execute_command(command: str):
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, shell=True)
+    process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
     output, error = process.communicate()
-    if error:
-        return {"error": error.decode()}
-    return {"output": output.decode()}
 
+    if error:
+        return {'output': error.decode('utf-8')}
+    else:
+        return {'output': output.decode('utf-8')}
+    
 @app.post("/containermain/{id}")
 async def create_container_main(id: str):
     containers = {container.name: container for container in client.containers.list(all=True)}

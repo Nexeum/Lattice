@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Card, Button, Modal, TextInput, Label, Badge, Spinner, Table } from "flowbite-react";
 import { useParams } from 'react-router-dom';
 import { Cli } from './Cli';
+import { Graph } from './Graph';
 
 export const Room = () => {
   const { id } = useParams();
@@ -16,6 +17,9 @@ export const Room = () => {
   const [success, setSuccess] = useState(false);
   const [containers, setContainers] = useState([]);
   const [creationResult, setCreationResult] = useState('');
+  const [openModalChangeNode, setOpenModalChangeNode] = useState(false);
+  const [nodes, setNodes] = useState([]);
+  const [links, setLinks] = useState([]);
 
   useEffect(() => {
     axios.get(`http://localhost:5002/rooms/${id}`)
@@ -37,10 +41,25 @@ export const Room = () => {
         setLoading(false);
       });
 
-    axios.get(`http://localhost:5001/containers/${id}/ps`)
+      axios.get(`http://localhost:5001/containers/${id}/ps`)
       .then(function (response) {
-        console.error(response.data.output);
-        setContainers(response.data.output);
+        const nodes = response.data.output.map(container => ({
+          id: container.ID,
+          name: container.Name,
+          image: container.Image,
+          status: container.Status,
+          ip: container.IP,
+        }));
+        setNodes(nodes);
+        const links = [];
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            if (nodes[i].network === nodes[j].network) {
+              links.push({ source: nodes[i].id, target: nodes[j].id });
+            }
+          }
+        }
+        setLinks(links);
       })
       .catch(function (error) {
         console.error(error);
@@ -50,7 +69,6 @@ export const Room = () => {
   const createContainer = () => {
     axios.get(`http://localhost:5001/container/${id}/${containerName}/${containerImage}/${containerShell}`)
       .then(function (response) {
-        console.error(response.data);
         setCreationResult("Container created successfully with output: " + response.data.output);
       })
       .catch(function (error) {
@@ -68,40 +86,17 @@ export const Room = () => {
           <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
             {room ? room.name : 'Loading...'}
           </h2>
-          <Button onClick={() => setOpenModalCreate(true)}>Create Container</Button>
+          <div className="flex space-x-4">
+            <Button onClick={() => {
+              setOpenModalChangeNode(true);
+            }}>Change Node</Button>
+            <Button onClick={() => setOpenModalCreate(true)}>Create Container</Button>
+          </div>
         </div>
 
         <div className="flex space-x-4">
           <div className="flex w-full">
             <Cli />
-            <Table>
-              <Table.Head>
-                <Table.HeadCell>ID</Table.HeadCell>
-                <Table.HeadCell>Name</Table.HeadCell>
-                <Table.HeadCell>Image</Table.HeadCell>
-                <Table.HeadCell>Status</Table.HeadCell>
-                <Table.HeadCell>IP</Table.HeadCell>
-              </Table.Head>
-              <Table.Body className="divide-y">
-                {containers.map((container, index) => (
-                  <Table.Row key={index} className="bg-white dark:border-gray-700 dark:bg-gray-800">
-                    <Table.Cell className="whitespace-nowrap font-medium text-gray-900 dark:text-white">
-                      {container.ID}
-                    </Table.Cell>
-                    <Table.Cell>{container.Name}</Table.Cell>
-                    <Table.Cell>{container.Image}</Table.Cell>
-                    <Table.Cell>
-                      {container.Status === 'running' ? (
-                        <Badge color="success">Running</Badge>
-                      ) : (
-                        <Badge color="failure">Exited</Badge>
-                      )}
-                    </Table.Cell>
-                    <Table.Cell>{container.IP}</Table.Cell>
-                  </Table.Row>
-                ))}
-              </Table.Body>
-            </Table>
           </div>
         </div>
       </Card>
@@ -144,6 +139,22 @@ export const Room = () => {
             </div>
           ))}
         </Modal.Body>
+      </Modal>
+      <Modal show={openModalChangeNode} onClose={() => setOpenModalChangeNode(false)}>
+        <Modal.Header>Change Node</Modal.Header>
+        <Modal.Body>
+          <Graph nodes={nodes} links={links} />
+        </Modal.Body>
+        <Modal.Footer>
+          <Button onClick={() => {
+            setOpenModalChangeNode(false);
+          }}>Change</Button>
+          <Button color="gray" onClick={() => {
+            setOpenModalChangeNode(false);
+          }}>
+            Cancel
+          </Button>
+        </Modal.Footer>
       </Modal>
     </div>
   );
