@@ -51,6 +51,7 @@ export const Room = () => {
           ip: container.IP,
         }));
         setNodes(nodes);
+        console.log(nodes);
         const links = [];
         for (let i = 0; i < nodes.length; i++) {
           for (let j = i + 1; j < nodes.length; j++) {

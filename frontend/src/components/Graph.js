@@ -32,12 +32,18 @@ export const Graph = ({ nodes }) => {
             .join('text')
             .attr('fill', 'white')
             .attr('x', d => d.x)
-            .attr('y', d => d.y);
-
-        labels.append('tspan').text(d => d.name);
-        labels.append('tspan').attr('x', d => d.x).attr('dy', '1.2em').text(d => d.image);
-        labels.append('tspan').attr('x', d => d.x).attr('dy', '1.2em').text(d => d.status);
-        labels.append('tspan').attr('x', d => d.x).attr('dy', '1.2em').text(d => d.ip);
+            .attr('y', d => d.y)
+            .attr('text-anchor', 'middle')
+            .attr('dominant-baseline', 'middle')
+            .attr('font-size', '10px'); // Adjust the font size as needed
+        
+        labels.selectAll('tspan')
+            .data(d => [d.name, d.image, d.status, d.ip])
+            .join('tspan')
+            .attr('x', d => d.x)
+            .attr('dy', (d, i) => i ? '1em' : 0)
+            .text(d => d);
+        
 
         const zoom = d3.zoom()
             .scaleExtent([0.1, 10])
@@ -76,7 +82,6 @@ export const Graph = ({ nodes }) => {
 
             node.attr('cx', d => d.x).attr('cy', d => d.y);
             labels.attr('x', d => d.x).attr('y', d => d.y);
-            labels.selectAll('tspan').attr('x', d => d.x);
         });
         return () => simulation.stop();
     }, [nodes]);

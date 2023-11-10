@@ -16,11 +16,21 @@ export const ContainerDetails = () => {
   const [concurrentClients, setConcurrentClients] = useState(0);
   const [averageResponseTime, setAverageResponseTime] = useState(0);
   const [qps, setQps] = useState(0);
-  const [showModal, setShowModal] = useState(false);
   const [overloadData, setOverloadData] = useState({});
+  const [openModal, setOpenModal] = useState(false);
+  const [graphData, setGraphData] = useState({});
 
   const startLoadTest = () => {
-    setShowModal(true);
+    setOpenModal(true);
+  
+    axios.get(`http://localhost:5001/container/${id}/overload`)
+      .then(response => {
+        console.log(response.data);
+        setGraphData(response.data);
+      })
+      .catch(error => {
+        console.error(error);
+      });
   };
 
   useEffect(() => {
@@ -166,13 +176,21 @@ export const ContainerDetails = () => {
             <Button onClick={startLoadTest}>Start Load Test</Button>
           </Card>
         </div>
-        <Modal isOpen={showModal} onClose={() => setShowModal(false)}>
-          <Modal.Header>Overload Data</Modal.Header>
+        <Modal show={openModal} onClose={() => setOpenModal(false)}>
+          <Modal.Header>Terms of Service</Modal.Header>
           <Modal.Body>
-            <Line data={dataOverload} options={options} />
+            <div className="space-y-6">
+              <p className="text-base leading-relaxed text-gray-500 dark:text-gray-400">
+                With less than a month to go before the European Union enacts new consumer privacy laws for its citizens,
+                companies around the world are updating their terms of service agreements to comply.
+              </p>
+            </div>
           </Modal.Body>
           <Modal.Footer>
-            <Button color="red" onClick={() => setShowModal(false)}>Close</Button>
+            <Button onClick={() => setOpenModal(false)}>I accept</Button>
+            <Button color="gray" onClick={() => setOpenModal(false)}>
+              Decline
+            </Button>
           </Modal.Footer>
         </Modal>
       </Card>

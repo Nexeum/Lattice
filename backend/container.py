@@ -7,6 +7,9 @@ import docker
 import requests
 import time
 import shlex
+import numpy as np
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 client = docker.from_env()
 
@@ -54,6 +57,54 @@ def get_qps(ip):
     qps = num_requests / elapsed_time
     return qps
 
+def start_overload_test(container_id):
+    latencies = []
+    container = client.containers.get(id)
+    ports = container.attrs['NetworkSettings']['Ports']
+    if not ports:
+        ip = get_container_ip(id)
+    else:
+        port_mapping = next(iter(ports.values()))[0]
+        port = port_mapping['HostPort']
+        ip = f"localhost:{port}"
+        
+    while True:
+        start_time = time.time()
+
+        try:
+            response = requests.get(f'http://{ip}')
+            response.raise_for_status()
+        except requests.HTTPError:
+            break
+
+        end_time = time.time()
+        latency = end_time - start_time
+        latencies.append(latency)
+
+    latencies = np.array(latencies)
+    p99 = np.percentile(latencies, 99)
+    p95 = np.percentile(latencies, 95)
+    p90 = np.percentile(latencies, 90)
+    mean = np.mean(latencies)
+    max_latency = np.max(latencies)
+    min_latency = np.min(latencies)
+
+    return {
+        "p99": p99,
+        "p95": p95,
+        "p90": p90,
+        "mean": mean,
+        "max": max_latency,
+        "min": min_latency
+    }
+
+@app.get("/container/{id}/overload")
+async def start_overload_test_endpoint(id: str):
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+        data = await loop.run_in_executor(pool, start_overload_test, id)
+    return data
+
 @app.post('/exe/{command}')
 async def execute_command(command: str):
     process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
@@ -80,7 +131,7 @@ async def list_containers(container_id: str):
     containers_info = exec_id.output.decode("utf-8").split("\n")
     containers_with_ip = []
     for container_info in containers_info:
-        if container_info:
+        if container_info and container_info.count(",") == 3:
             container_id, name, image, status = container_info.split(",")
             ip_exec_id = container.exec_run("sh -c 'docker inspect --format \"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\" " + container_id + "'", privileged=True)
             ip = ip_exec_id.output.decode("utf-8").strip()
