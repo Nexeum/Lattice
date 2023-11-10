@@ -4,6 +4,8 @@ from pymongo import MongoClient
 from bson.objectid import ObjectId
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import UploadFile, File
+import gridfs
+from gridfs.errors import NoFile
 
 # Instantiation of FastAPI
 app = FastAPI()
@@ -20,6 +22,7 @@ app.add_middleware(
 client = MongoClient('mongodb://localhost:27017/')
 db = client['kubehub']
 collection = db['package']
+fs = gridfs.GridFS(db)
 
 @app.get("/packages")
 async def get_packages():
@@ -42,6 +45,12 @@ async def get_package(package_id: str):
     package = collection.find_one({"_id": ObjectId(package_id)})
     if package is not None:
         package["_id"] = str(package["_id"])
+        for file in package["files"]:
+            try:
+                grid_out = fs.get_last_version(filename=file["name"])
+                file["content"] = grid_out.read().decode('utf-8')
+            except NoFile:
+                raise HTTPException(status_code=404, detail=f"File {file['name']} not found")
         return package
     else:
         raise HTTPException(status_code=404, detail="Package not found")
@@ -68,6 +77,9 @@ async def upload_file_to_package(package_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=404, detail="Package not found")
 
     contents = await file.read()
+
+    # Store the file content in GridFS
+    fs.put(contents, filename=file.filename)
 
     file_info = {"name": file.filename, "size": len(contents)}
     collection.update_one({"_id": ObjectId(package_id)}, {"$push": {"files": file_info}})

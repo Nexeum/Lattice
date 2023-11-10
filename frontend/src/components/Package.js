@@ -42,16 +42,18 @@ export const Package = () => {
                             <>
                                 <Card className="w-3/4 rounded-xl shadow-md dark:bg-gray-800 text-white">
                                     <Table hoverable>
-                                        {packageData.files.map((file, index) => (
-                                            <Table.Row key={index}>
-                                                <Table.Cell>
-                                                    <div className="flex items-center">
-                                                        {file.name.endsWith('.txt') || file.name.endsWith('.bat') ? <FaFile /> : <FaFolder />}
-                                                        <span className="ml-2">{file.name}</span>
-                                                    </div>
-                                                </Table.Cell>
-                                            </Table.Row>
-                                        ))}
+                                        <Table.Body>
+                                            {packageData.files.map((file, index) => (
+                                                <Table.Row key={index}>
+                                                    <Table.Cell>
+                                                        <div className="flex items-center">
+                                                            {file.name.endsWith('.txt') || file.name.endsWith('.bat') ? <FaFile /> : <FaFolder />}
+                                                            <span className="ml-2">{file.name}</span>
+                                                        </div>
+                                                    </Table.Cell>
+                                                </Table.Row>
+                                            ))}
+                                        </Table.Body>
                                     </Table>
                                 </Card>
                                 <Card className="w-1/4 rounded-xl shadow-md dark:bg-gray-800 p-4">

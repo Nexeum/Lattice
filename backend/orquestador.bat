@@ -1,4 +1,4 @@
-start cmd /k uvicorn app:app --reload --log-level debug --port 5000
-start cmd /k uvicorn container:app --reload --log-level debug --port 5001
-start cmd /k uvicorn room:app --reload --log-level debug --port 5002
-start cmd /k uvicorn package:app --reload --log-level debug --port 5003
+wt --title "App" -d . powershell -NoExit uvicorn app:app --reload --log-level debug --port 5000 ^
+; new-tab --title "Container" -d . powershell -NoExit uvicorn container:app --reload --log-level debug --port 5001 ^
+; new-tab --title "Room" -d . powershell -NoExit uvicorn room:app --reload --log-level debug --port 5002 ^
+; new-tab --title "Package" -d . powershell -NoExit uvicorn package:app --reload --log-level debug --port 5003
