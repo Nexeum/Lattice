@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useMemo } from 'react';
 import * as d3 from 'd3';
 
 const calculateLineEnd = (source, target, targetRadius) => {
@@ -35,6 +35,20 @@ const createElements = (g, nodes, orchestrator) => {
         .attr('dy', (d, i) => `${i * 10 - 1}px`)
         .text(d => d);
 
+    elements.filter(d => d.id === orchestrator.id)
+        .select('circle')
+        .attr('r', 100) 
+        .attr('fill', '#1F2937')
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 4);
+
+    elements.filter(d => d.id !== orchestrator.id)
+        .select('circle')
+        .attr('r', 60)
+        .attr('fill', '#273241')
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 2);
+
     return elements;
 };
 
@@ -57,7 +71,7 @@ const configureSimulation = (nodes, links, orchestrator, onTick) => {
 
 export const Graph = ({ nodes }) => {
     const ref = useRef();
-    const orchestrator = { id: 'orchestrator', x: 0, y: 0, fx: 0, fy: 0 };
+    const orchestrator = useMemo(() => ({ id: 'orchestrator', x: 0, y: 0, fx: 0, fy: 0 }), []);
 
     useEffect(() => {
         const links = nodes.map(node => ({ source: 'orchestrator', target: node.id }));
@@ -66,6 +80,15 @@ export const Graph = ({ nodes }) => {
         const elements = createElements(g, nodes, orchestrator);
         const linkElements = createLinks(g, links);
 
+        const onNodeClick = (d) => {
+            if (d.id !== orchestrator.id) {
+                const newPath = `/node/${d.name}`;
+                window.location.href = newPath;
+            }
+        };
+
+        elements.on('click', onNodeClick);
+
         const zoom = d3.zoom()
             .scaleExtent([0.1, 10])
             .on('zoom', (event) => g.attr('transform', event.transform));
@@ -73,24 +96,16 @@ export const Graph = ({ nodes }) => {
 
         const simulation = configureSimulation(nodes, links, orchestrator, () => {
             linkElements
-                .attr('x1', d => calculateLineEnd(orchestrator, d.target, 100).x) // Orquestador como origen
+                .attr('x1', d => calculateLineEnd(orchestrator, d.target, 100).x)
                 .attr('y1', d => calculateLineEnd(orchestrator, d.target, 100).y)
-                .attr('x2', d => calculateLineEnd(d.source, d.target, 60).x) // Nodo como destino
+                .attr('x2', d => calculateLineEnd(d.source, d.target, 60).x)
                 .attr('y2', d => calculateLineEnd(d.source, d.target, 60).y);
 
             elements.attr('transform', d => `translate(${d.x}, ${d.y})`);
         });
 
         return () => simulation.stop();
-    }, [nodes]);
+    }, [nodes, orchestrator]);
 
-    const calculatePosition = (d, axis) => {
-        const offsetTarget = d.target.id === orchestrator.id ? 100 : 60;
-        const delta = d.target[axis] - d.source[axis];
-        const distance = Math.sqrt(delta * delta);
-        const scale = (distance - offsetTarget) / distance;
-        return d.source[axis] + delta * scale;
-    };
-
-    return <svg ref={ref}></svg>;
+    return <svg ref={ref} style={{ width: '100%', height: '100%' }}></svg>;
 };

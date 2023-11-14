@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { Card, Button, Spinner, Table, Badge } from "flowbite-react";
+import React, { useState, useEffect } from "react";
+import { Card, Spinner, Table, Badge, Button } from "flowbite-react";
 import axios from "axios";
 import { Link } from "react-router-dom";
 
@@ -24,24 +24,22 @@ const useContainers = () => {
   return { containers, fetchContainers, loading, error };
 };
 
+const getBadgeColor = (status) => {
+  if (status.startsWith("running")) {
+    return "success";
+  } else if (status.startsWith("exited")) {
+    return "failure";
+  } else {
+    return "gray";
+  }
+};
+
 export const Statify = () => {
   const { containers, fetchContainers, loading, error } = useContainers();
-  const [showTable, setShowTable] = useState(false);
 
-  const handleScan = async () => {
-    await fetchContainers();
-    setShowTable(true);
-  };
-
-  const getBadgeColor = (status) => {
-    if (status.startsWith("running")) {
-      return "success";
-    } else if (status.startsWith("exited")) {
-      return "failure";
-    } else {
-      return "gray";
-    }
-  };
+  useEffect(() => {
+    fetchContainers();
+  }, []);
 
   return (
     <div className="flex flex-col p-8">
@@ -50,17 +48,11 @@ export const Statify = () => {
           Local Containers
         </h2>
         <p className="text-gray-500 dark:text-gray-400 mb-4">
-          Click the button below to fetch the local containers.
+          Local container information is listed below.
         </p>
-        <Button
-          onClick={handleScan}
-          color="light"
-          className="flex items-center space-x-2 mb-4"
-        >
-          {loading ? <Spinner /> : "Get containers"}
-        </Button>
+        {loading && <Spinner />}
         {error && <p className="text-red-500 mb-4">{error}</p>}
-        {showTable && (
+        {!loading && !error && (
           <Table hoverable className="mt-4 divide-y divide-gray-200">
             <Table.Head>
               <Table.HeadCell>Name</Table.HeadCell>

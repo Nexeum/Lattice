@@ -14,6 +14,7 @@ import { Tars } from "./components/Tars";
 import { ContainerDetails } from "./components/ContainerDetails";
 import { Room } from "./components/room";
 import { Package } from "./components/Package";
+import { Node } from "./components/Node";
 
 import "./App.css";
 
@@ -163,6 +164,13 @@ function App() {
                     component={Package}
                     authenticated={authenticated}
                   />
+                  <ProtectedRoute
+                    exact
+                    path="/room/:roomId/node/:nodeId"
+                    component={Node}
+                    authenticated={authenticated}
+                  />
+
                 </Switch>
               </div>
               <div className="w-1/5">
