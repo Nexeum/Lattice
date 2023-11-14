@@ -88,6 +88,7 @@ export const Nodesly = () => {
   };
 
   const handleCreateRoom = async () => {
+    const token = localStorage.getItem("token");
     if (token) {
       const userId = await getUserId(token);
       if (userId) {
@@ -129,9 +130,9 @@ export const Nodesly = () => {
       <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800">
         <div className="flex justify-between items-center">
           <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-            Rooms
+            Workspace
           </h2>
-          <Button onClick={() => setOpenModal(true)}>Create Room</Button>
+          <Button onClick={() => setOpenModal(true)}>Create Workspace</Button>
         </div>
         <div className="grid grid-cols-3 gap-4">
           {rooms.length > 0 ? rooms.map((room) => (
@@ -148,9 +149,9 @@ export const Nodesly = () => {
         </div>
       </Card>
       <Modal show={openModal} onClose={() => setOpenModal(false)}>
-        <Modal.Header>Create a Room</Modal.Header>
+        <Modal.Header>Create a Workspace</Modal.Header>
         <Modal.Body>
-          <Label htmlFor="rm">Room name</Label>
+          <Label htmlFor="rm">Workspace name</Label>
           <TextInput id="rm" name="rm" value={roomName} onChange={e => setRoomName(e.target.value)} />
           <Label htmlFor="private">Type</Label>
           <Select id="private" value={isPrivate} onChange={e => setIsPrivate(e.target.value)}>

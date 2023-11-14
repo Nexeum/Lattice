@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Button, TextInput } from "flowbite-react";
 import axios from 'axios';
+import { useParams } from 'react-router-dom';
 
 export const Cli = () => {
+  const { id } = useParams();
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
   const outputEndRef = useRef(null);
@@ -14,7 +16,7 @@ export const Cli = () => {
   const handleCommandSubmit = async (event) => {
     event.preventDefault();
     const response = await axios.post(
-      `http://localhost:5001/exe/${encodeURIComponent(input)}`
+      `http://localhost:5001/exe/${id}/${encodeURIComponent(input)}`
     );
     setOutput(response.data.output);
     setInput("");
@@ -25,20 +27,20 @@ export const Cli = () => {
   }, [output]);
 
   return (
-    <div className="w-full space-y-4 flex flex-col h-64 bg-black text-white overflow-auto p-4">
-      <div className="flex-grow">
-        <pre className="whitespace-pre-wrap">{output}</pre>
+    <div className="w-full space-y-4 flex flex-col bg-gray-900 text-white overflow-auto p-4 rounded-lg shadow-lg">
+      <div className="flex-grow flex min-h-[500px]">
+        <pre className="whitespace-pre-wrap flex-grow">{output}</pre>
         <div ref={outputEndRef}></div>
       </div>
-      <form onSubmit={handleCommandSubmit}>
+      <form onSubmit={handleCommandSubmit} className="flex-none">
         <div className="flex">
           <TextInput
             type="text"
             value={input}
             onChange={handleInputChange}
-            className="w-full bg-black text-white"
+            className="w-full bg-gray-800 text-white rounded-lg shadow-inner"
           />
-          <Button type="submit" className="ml-2">
+          <Button type="submit" className="ml-2 bg-green-500 hover:bg-green-600 text-white rounded-lg shadow-lg">
             Execute
           </Button>
         </div>

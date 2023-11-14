@@ -105,15 +105,19 @@ async def start_overload_test_endpoint(id: str):
         data = await loop.run_in_executor(pool, start_overload_test, id)
     return data
 
-@app.post('/exe/{command}')
-async def execute_command(command: str):
-    process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
-    output, error = process.communicate()
+@app.post('/exe/{container_id}/{command}')
+async def execute_command(container_id: str, command: str):
+    try:
+        container = client.containers.get(container_id)
+        exec_id = container.exec_run(f"sh -c '{command}'", privileged=True)
+        output = exec_id.output.decode("utf-8")
 
-    if error:
-        return {'output': error.decode('utf-8')}
-    else:
-        return {'output': output.decode('utf-8')}
+        if exec_id.exit_code != 0:
+            return {'error': output}
+        else:
+            return {'output': output}
+    except Exception as e:
+        return {'error': str(e)}
     
 @app.post("/containermain/{id}")
 async def create_container_main(id: str):
