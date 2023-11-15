@@ -13,9 +13,6 @@ export const ContainerDetails = () => {
   const [cpuPercData, setCpuPercData] = useState([]);
   const [memPerc, setMemPerc] = useState(0);
   const [timestamps, setTimestamps] = useState([]);
-  const [concurrentClients, setConcurrentClients] = useState(0);
-  const [averageResponseTime, setAverageResponseTime] = useState(0);
-  const [qps, setQps] = useState(0);
   const [overloadData, setOverloadData] = useState({});
   const [openModal, setOpenModal] = useState(false);
   const [graphData, setGraphData] = useState({});
@@ -58,35 +55,18 @@ export const ContainerDetails = () => {
     };
   }, [id]);
 
-  useEffect(() => {
-    const calculatedConcurrentClients = qps * averageResponseTime;
-    setConcurrentClients(calculatedConcurrentClients);
-
-    axios.get(`http://localhost:5001/container/${id}/aprox`)
-      .then(response => {
-        const roundedAverageResponseTime = Math.round(response.data.averageResponseTime * 100) / 100;
-        const roundedQps = Math.round(response.data.qps);
-        setAverageResponseTime(roundedAverageResponseTime);
-        setQps(roundedQps);
-      })
-      .catch(error => {
-        console.error(error);
-      });
-  }, [id, qps, averageResponseTime]);
-
   const dataMemUsage = {
     labels: ['MemUsage'],
     datasets: [
       {
         label: 'MemUsage in MiB',
         data: [memUsage],
-        backgroundColor: ['rgba(75, 192, 192, 0.2)'],
-        borderColor: ['rgba(75, 192, 192, 1)'],
+        backgroundColor: ['rgba(70, 130, 180, 0.5)'],
+        borderColor: ['rgba(70, 130, 180, 1)'],
         borderWidth: 1,
       },
     ],
   };
-
   const dataCpuPerc = {
     labels: timestamps,
     datasets: [
@@ -159,23 +139,7 @@ export const ContainerDetails = () => {
             <Doughnut data={dataMemPerc} options={options} />
           </Card>
         </div>
-        <div className="w-full">
-          <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white mb-4">
-            Performance Test Aprox
-          </h1>
-          <Card className="flex-grow space-y-4 rounded-xl shadow-md dark:bg-gray-800">
-            <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
-              Concurrent Clients: {concurrentClients}
-            </h3>
-            <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
-              Average Response Time: {averageResponseTime} seconds
-            </h3>
-            <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
-              Queries Per Second: {qps}
-            </h3>
-            <Button onClick={startLoadTest}>Start Load Test</Button>
-          </Card>
-        </div>
+        <Button onClick={startLoadTest}>Start Load Test</Button>
         <Modal show={openModal} onClose={() => setOpenModal(false)}>
           <Modal.Header>Terms of Service</Modal.Header>
           <Modal.Body>

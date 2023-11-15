@@ -70,7 +70,7 @@ export const Statify = () => {
                     </Badge>
                   </Table.Cell>
                   <Table.Cell>
-                    {container.Port && container.Port !== "N/A" && (
+                    {container.Port && container.Port !== "N/A" && String(container.Status).startsWith("running") && (
                       <Link to={`/container/${container.ID}`}>
                         <Button>View</Button>
                       </Link>

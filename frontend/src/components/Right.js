@@ -13,18 +13,41 @@ export const Right = () => {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [packageData, setPackageData] = useState(null);
+  const [concurrentClients, setConcurrentClients] = useState(0);
+  const [averageResponseTime, setAverageResponseTime] = useState(0);
+  const [qps, setQps] = useState(0);
+
   const pathSegments = window.location.pathname.split('/');
   const id = pathSegments[pathSegments.length - 1];
-  console.log(id);
+
   useEffect(() => {
+    if (window.location.pathname.includes("/package")) {
       const fetchData = async () => {
-          const response = await axios.get(`http://localhost:5003/packages/${id}`);
-          setPackageData(response.data);
-          console.log(response.data);
+        const response = await axios.get(`http://localhost:5003/packages/${id}`);
+        setPackageData(response.data);
       };
 
       fetchData();
+    }
   }, [id]);
+
+  useEffect(() => {
+    if (window.location.pathname.includes("/container")) {
+      const calculatedConcurrentClients = qps * averageResponseTime;
+      setConcurrentClients(calculatedConcurrentClients);
+
+      axios.get(`http://localhost:5001/container/${id}/aprox`)
+        .then(response => {
+          const roundedAverageResponseTime = Math.round(response.data.averageResponseTime * 100) / 100;
+          const roundedQps = Math.round(response.data.qps);
+          setAverageResponseTime(roundedAverageResponseTime);
+          setQps(roundedQps);
+        })
+        .catch(error => {
+          console.error(error);
+        });
+    }
+  }, [id, qps, averageResponseTime]);
 
   const validationSteps = [
     'Initializing Orchestrator Docker Instance',
@@ -195,6 +218,24 @@ export const Right = () => {
                 </div>
               ))}
             </div>
+          </Card>
+        ) : null}
+        {location.pathname.includes("/container") ? (
+          <Card className="max-w-sm mb-4">
+            <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white mb-4">
+              Performance Test
+            </h1>
+            <Card className="flex-grow space-y-4 rounded-xl shadow-md dark:bg-gray-800">
+              <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
+                Concurrent Clients: {concurrentClients}
+              </h3>
+              <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
+                Average Response Time: {averageResponseTime} seconds
+              </h3>
+              <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
+                Queries Per Second: {qps}
+              </h3>
+            </Card>
           </Card>
         ) : null}
       </div>
