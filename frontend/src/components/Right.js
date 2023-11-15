@@ -85,7 +85,7 @@ export const Right = () => {
             <img
               alt="User image"
               height="96"
-              src="https://cdn-icons-png.flaticon.com/128/6864/6864026.png"
+              src="https://th.bing.com/th/id/OIG.q3iFkMBl3odPVneKCIWg?pid=ImgGn"
               width="96"
               className="mb-3 rounded-full shadow-lg"
             />

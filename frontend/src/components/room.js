@@ -52,7 +52,7 @@ export const Room = () => {
       <Card className="w-full space-y-4">
         <div className="flex justify-between items-center">
           <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-            {room ? room.name : 'Loading...'}
+            {room ? room.name + " - Orchestrator": 'Loading...'}
           </h2>
           <div className="flex space-x-4">
             <Button onClick={() => {

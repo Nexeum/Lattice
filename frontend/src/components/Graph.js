@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useMemo } from 'react';
 import * as d3 from 'd3';
 
@@ -42,6 +43,14 @@ const createElements = (g, nodes, orchestrator) => {
         .attr('stroke', '#fff')
         .attr('stroke-width', 4);
 
+    elements.filter(d => d.id === orchestrator.id)
+        .append('text')
+        .attr('fill', 'white')
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '20px')
+        .attr('dy', '0.3em')
+        .text('Orchestrator');
+
     elements.filter(d => d.id !== orchestrator.id)
         .select('circle')
         .attr('r', 60)
@@ -79,15 +88,6 @@ export const Graph = ({ nodes }) => {
         const g = svg.append('g');
         const elements = createElements(g, nodes, orchestrator);
         const linkElements = createLinks(g, links);
-
-        const onNodeClick = (d) => {
-            if (d.id !== orchestrator.id) {
-                const newPath = `/node/${d.name}`;
-                window.location.href = newPath;
-            }
-        };
-
-        elements.on('click', onNodeClick);
 
         const zoom = d3.zoom()
             .scaleExtent([0.1, 10])

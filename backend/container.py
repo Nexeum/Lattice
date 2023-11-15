@@ -6,10 +6,10 @@ from fastapi import FastAPI, HTTPException
 import docker
 import requests
 import time
-import shlex
+import random
 import numpy as np
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 client = docker.from_env()
 
@@ -33,28 +33,42 @@ def get_container_ip(id):
     container = client.containers.get(id)
     return container.attrs['NetworkSettings']['IPAddress']
 
-def get_average_response_time(ip):
-    response_times = []
-    for _ in range(100):
+def make_request(ip):
+    try:
         start_time = time.time()
-        response = requests.get(f'http://{ip}')
+        response = requests.get(f'http://{ip}', timeout=5)
         response_time = time.time() - start_time
-        response_times.append(response_time)
 
-    average_response_time = sum(response_times) / len(response_times)
-    return average_response_time
+        if response.status_code == 200:
+            print(f'Response Time: {response_time}')
+            return response_time
+        else:
+            print(f'Error: Received status code {response.status_code}')
+            return None
+    except requests.RequestException as e:
+        print(f'Request Exception: {e}')
+        return None
+    
+def get_average_response_time(ip, num_requests=100):
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        response_times = list(filter(None, executor.map(lambda _: make_request(ip), range(num_requests))))
 
-def get_qps(ip):
-    num_requests = 100
+    if response_times:
+        average_response_time = sum(response_times) / len(response_times)
+        return average_response_time
+    else:
+        return None
+
+def get_qps(ip, num_requests=100):
     start_time = time.time()
 
-    for _ in range(num_requests):
-        response = requests.get(f'http://{ip}')
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        executor.map(lambda _: make_request(ip), range(num_requests))
 
     end_time = time.time()
     elapsed_time = end_time - start_time
 
-    qps = num_requests / elapsed_time
+    qps = num_requests / elapsed_time if elapsed_time > 0 else 0
     return qps
 
 def start_overload_test(container_id):

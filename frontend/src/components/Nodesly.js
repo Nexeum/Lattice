@@ -3,34 +3,83 @@ import { Card, Button, Modal, TextInput, Label, Select } from "flowbite-react";
 import axios from 'axios';
 import { useHistory } from "react-router-dom";
 
-export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJoin, owner, currentUserId }) => {
-  const handleStateChange = () => {
-    onStateChange(roomName);
+export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJoin, owner, currentUserId, setRooms, rooms }) => {
+  const [changeRoomId, setChangeRoomId] = useState(null);
+  const [changePasswordModal, setChangePasswordModal] = useState(false);
+  const [password, setPassword] = useState('');
+
+  const handleStateChange = async (roomId, isPublic) => {
+    if (isPublic) {
+      setChangeRoomId(roomId);
+      setChangePasswordModal(true);
+    } else {
+      const room = {
+        is_private: false,
+        password: ''
+      };
+      updateRoom(roomId, room);
+    }
   };
 
   const handleJoin = () => {
     onJoin(roomId);
   };
 
+  const updateRoom = async (roomId, room) => {
+    console.log(roomId);
+    try {
+      const response = await axios.put(`http://localhost:5002/rooms/${roomId}`, room);
+      if (response.data) {
+        setRooms(rooms.map(r => r._id === roomId ? { ...r, ...response.data } : r));
+      }
+    } catch (error) {
+      console.error('There was an error!', error);
+    }
+  };
+
+  const handleChangePasswordSubmit = () => {
+    const room = {
+      is_private: true,
+      password: password
+    };
+    updateRoom(changeRoomId, room);
+    setChangePasswordModal(false);
+  };
+
   return (
-    <Card className="space-y-4 rounded-xl shadow-md dark:bg-gray-800">
-      <div className="mb-4 flex items-center justify-between">
-        <h5 className="text-xl font-bold leading-none text-gray-900 dark:text-white">{roomName}</h5>
-        <h5 className="text-sm font-medium text-cyan-600 dark:text-cyan-500">
-          {isPublic ? "Public" : "Private"}
-        </h5>
-      </div>
-      <div className="flex flex-col h-full p-4">
-        <Button onClick={handleJoin} className="mt-auto m-4">
-          Join
-        </Button>
-        {currentUserId === owner && (
-          <Button onClick={handleStateChange} className="mt-auto m-4">
-            Change to {isPublic ? "Private" : "Public"}
+    <>
+      <Card className="space-y-4 rounded-xl shadow-md dark:bg-gray-800">
+        <div className="mb-4 flex items-center justify-between">
+          <h5 className="text-xl font-bold leading-none text-gray-900 dark:text-white">{roomName}</h5>
+          <h5 className="text-sm font-medium text-cyan-600 dark:text-cyan-500">
+            {isPublic ? "Public" : "Private"}
+          </h5>
+        </div>
+        <div className="flex flex-col h-full p-4">
+          <Button onClick={handleJoin} className="mt-auto m-4">
+            Join
           </Button>
-        )}
-      </div>
-    </Card>
+          {currentUserId === owner && (
+            <Button onClick={() => handleStateChange(roomId, isPublic)} className="mt-auto m-4">
+              Change to {isPublic ? "Private" : "Public"}
+            </Button>
+          )}
+        </div>
+      </Card>
+      <Modal show={changePasswordModal} onClose={() => setChangePasswordModal(false)}>
+        <Modal.Header>Enter Password</Modal.Header>
+        <Modal.Body>
+          <Label htmlFor="password">Password</Label>
+          <TextInput id="password" type="password" label="Password" value={password} onChange={e => setPassword(e.target.value)} />
+        </Modal.Body>
+        <Modal.Footer>
+          <Button onClick={handleChangePasswordSubmit}>Submit</Button>
+          <Button color="gray" onClick={() => setChangePasswordModal(false)}>
+            Cancel
+          </Button>
+        </Modal.Footer>
+      </Modal>
+    </>
   );
 };
 
@@ -54,13 +103,13 @@ export const Nodesly = () => {
         console.error('There was an error!', error);
       });
 
-      const fetchUserId = async () => {
-        const token = localStorage.getItem("token");
-        const userId = await getUserId(token);
-        setCurrentUserId(userId);
-      };
-  
-      fetchUserId();
+    const fetchUserId = async () => {
+      const token = localStorage.getItem("token");
+      const userId = await getUserId(token);
+      setCurrentUserId(userId);
+    };
+
+    fetchUserId();
   }, []);
 
   const getUserId = async (token) => {
@@ -141,9 +190,12 @@ export const Nodesly = () => {
               roomId={room._id}
               roomName={room.name}
               isPublic={!room.is_private}
-              owner = {room.owner}
+              owner={room.owner}
               currentUserId={currentUserId}
               onJoin={() => handleJoinRoom(room._id, !room.is_private)}
+              onStateChange={() => handleStateChange(room._id, !room.is_private)}
+              setRooms={setRooms}
+              rooms={rooms}
             />
           )) : <p className="text-white">No rooms available. Create one?</p>}
         </div>

@@ -47,9 +47,6 @@ export const Statify = () => {
         <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white mb-4">
           Local Containers
         </h2>
-        <p className="text-gray-500 dark:text-gray-400 mb-4">
-          Local container information is listed below.
-        </p>
         {loading && <Spinner />}
         {error && <p className="text-red-500 mb-4">{error}</p>}
         {!loading && !error && (
@@ -75,7 +72,7 @@ export const Statify = () => {
                   <Table.Cell>
                     {container.Port && container.Port !== "N/A" && (
                       <Link to={`/container/${container.ID}`}>
-                        <Button color="light">View</Button>
+                        <Button>View</Button>
                       </Link>
                     )}
                   </Table.Cell>
