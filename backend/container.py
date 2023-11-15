@@ -142,6 +142,21 @@ async def execute_command(container_id: str, command: str):
     except Exception as e:
         return {'error': str(e)}
     
+@app.post('/node/{outer_container_id}/{inner_container_id}/{command}')
+async def execute_nested_command(outer_container_id: str, inner_container_id: str, command: str):
+    try:
+        outer_container = client.containers.get(outer_container_id)
+        nested_command = f"docker exec --privileged {inner_container_id} sh -c '{command}'"
+        exec_id = outer_container.exec_run(nested_command, privileged=True)
+        output = exec_id.output.decode("utf-8")
+
+        if exec_id.exit_code != 0:
+            return {'error': output}
+        else:
+            return {'output': output}
+    except Exception as e:
+        return {'error': str(e)}
+    
 @app.post("/containermain/{id}")
 async def create_container_main(id: str):
     containers = {container.name: container for container in client.containers.list(all=True)}

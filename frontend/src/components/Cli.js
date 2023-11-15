@@ -4,7 +4,18 @@ import axios from 'axios';
 import { useParams } from 'react-router-dom';
 
 export const Cli = () => {
-  const { id } = useParams();
+  let { id } = useParams();
+  let out;
+  if (!id) {
+    const pathSegments = window.location.pathname.split('/');
+
+    if (pathSegments.length >= 2) {
+      out = pathSegments[2];
+    }
+
+    id = pathSegments[pathSegments.length - 1];
+  }
+  console.log(id);
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("Innoxus Shell [🔧 Version 1.0.1 | Security Patch | Build 002].\n(c) Innoxus. All rights reserved.\n");
   const [history, setHistory] = useState([]);
@@ -18,9 +29,12 @@ export const Cli = () => {
   const handleCommandSubmit = async (event) => {
     event.preventDefault();
     const command = input;
-    const response = await axios.post(
-      `http://localhost:5001/exe/${id}/${encodeURIComponent(command)}`
-    );
+    const urlContainsNode = window.location.pathname.includes('/node/');
+    const endpoint = urlContainsNode 
+      ? `http://localhost:5001/node/${out}/${id}/${encodeURIComponent(command)}`
+      : `http://localhost:5001/exe/${id}/${encodeURIComponent(command)}`; 
+
+    const response = await axios.post(endpoint);
     setOutput(prevOutput => `${prevOutput}\n$ ${command}\n${response.data.output}`);
     setHistory(prevHistory => [...prevHistory, command]);
     setHistoryIndex(history.length);
