@@ -82,7 +82,7 @@ def start_overload_test(container_id):
             
     latencies = []
 
-    test_duration = 120
+    test_duration = 10
     start_time = time.time()
 
     while (time.time() - start_time) < test_duration:
