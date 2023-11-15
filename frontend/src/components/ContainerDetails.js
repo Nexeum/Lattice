@@ -19,16 +19,15 @@ export const ContainerDetails = () => {
 
   const startLoadTest = () => {
     setOpenModal(true);
-  
     axios.get(`http://localhost:5001/container/${id}/overload`)
       .then(response => {
-        console.log(response.data);
-        setGraphData(response.data);
+        setOverloadData(response.data);
       })
       .catch(error => {
         console.error(error);
       });
   };
+
 
   useEffect(() => {
     const intervalId = setInterval(() => {
@@ -100,25 +99,25 @@ export const ContainerDetails = () => {
     ],
   };
 
-  const options = {
-    scales: {
-      y: {
-        beginAtZero: true
-      }
-    }
-  };
-
   const dataOverload = {
-    labels: ['p99', 'p95', 'p90', 'mean', 'max', 'min'],
+    labels: Object.keys(overloadData),
     datasets: [
       {
-        label: 'Overload',
+        label: 'Response Time (s)',
         data: Object.values(overloadData),
         fill: false,
         borderColor: 'rgb(75, 192, 192)',
         tension: 0.1
       },
     ],
+  };
+
+  const options = {
+    scales: {
+      y: {
+        beginAtZero: true
+      }
+    }
   };
 
   return (
@@ -141,20 +140,12 @@ export const ContainerDetails = () => {
         </div>
         <Button onClick={startLoadTest}>Start Load Test</Button>
         <Modal show={openModal} onClose={() => setOpenModal(false)}>
-          <Modal.Header>Terms of Service</Modal.Header>
+          <Modal.Header>Overload Test Results</Modal.Header>
           <Modal.Body>
-            <div className="space-y-6">
-              <p className="text-base leading-relaxed text-gray-500 dark:text-gray-400">
-                With less than a month to go before the European Union enacts new consumer privacy laws for its citizens,
-                companies around the world are updating their terms of service agreements to comply.
-              </p>
-            </div>
+            <Line data={dataOverload} options={options} />
           </Modal.Body>
           <Modal.Footer>
-            <Button onClick={() => setOpenModal(false)}>I accept</Button>
-            <Button color="gray" onClick={() => setOpenModal(false)}>
-              Decline
-            </Button>
+            <Button onClick={() => setOpenModal(false)}>Close</Button>
           </Modal.Footer>
         </Modal>
       </Card>

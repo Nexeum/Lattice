@@ -44,9 +44,11 @@ export const Statify = () => {
   return (
     <div className="flex flex-col p-8">
       <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800 p-6">
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white mb-4">
-          Local Containers
-        </h2>
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
+            Local Containers 
+          </h2>
+        </div>
         {loading && <Spinner />}
         {error && <p className="text-red-500 mb-4">{error}</p>}
         {!loading && !error && (

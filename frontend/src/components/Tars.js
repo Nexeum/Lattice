@@ -1,35 +1,100 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { Card, Button, TextInput } from "flowbite-react";
+import axios from "axios";
+
+const userImageURL = "https://th.bing.com/th/id/OIG.q3iFkMBl3odPVneKCIWg?pid=ImgGn";
+const aiImageURL = "https://cdn-icons-png.flaticon.com/128/1344/1344707.png";
 
 export const Tars = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [messageSent, setMessageSent] = useState(false);
   const [suggestions, setSuggestions] = useState([
-    "How do I install Docker?",
-    "How do I create a pod in Kubernetes?",
-    "How do I scale an application in Kubernetes?",
-    "How do I share data between Docker containers?",
+    "How can I get started with Docker?",
+    "Give me an example of a Dockerfile for a simple Python app?",
+    "How does Docker simplify application deployment?",
+    "How do I install Docker on Linux?",
   ]);
 
-  const handleSend = useCallback(() => {
+  const fetchAnswer = async (question) => {
+    try {
+      const response = await axios.get(`http://localhost:5004/ask`, {
+        params: { question }
+      });
+      return response.data.answer;
+    } catch (error) {
+      console.error("Error fetching answer", error);
+      return "Sorry, I couldn't process your request.";
+    }
+  };
+
+  const handleSend = useCallback(async () => {
     if (input) {
-      setMessages((prevMessages) => [
-        ...prevMessages,
-        { text: input, sender: "user" },
-      ]);
       setInput("");
       setSuggestions([]);
-      setMessageSent(true);
+
+      const newMessage = { text: input, sender: "user" };
+      setMessages((prevMessages) => [...prevMessages, newMessage]);
+
+      const answer = await fetchAnswer(input);
+
+      const typingMessage = { text: "", sender: "ai" };
+      setMessages((prevMessages) => [...prevMessages, typingMessage]);
+
+      let currentMessage = "";
+
+      for (let i = 0; i < answer.length; i++) {
+        currentMessage += answer[i];
+        typingMessage.text = currentMessage;
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        setMessages((prevMessages) => [...prevMessages]);
+      }
+
+      setMessages((prevMessages) => [
+        ...prevMessages.filter((message) => message !== typingMessage),
+        { text: currentMessage, sender: "ai" },
+      ]);
     }
   }, [input]);
 
-  const handleSuggestionClick = useCallback((suggestion) => {
-    setMessages((prevMessages) => [
-      ...prevMessages,
-      { text: suggestion, sender: "user" },
-    ]);
+  const handleSuggestionClick = useCallback(async (suggestion) => {
+    setInput(suggestion);
     setSuggestions([]);
+    setInput("");
+    const answer = await fetchAnswer(suggestion);
+
+    const newMessage = { text: suggestion, sender: "user" };
+    setMessages((prevMessages) => [...prevMessages, newMessage]);
+
+    const typingMessage = { text: "", sender: "ai" };
+    setMessages((prevMessages) => [...prevMessages, typingMessage]);
+
+    let currentMessage = "";
+
+    for (let i = 0; i < answer.length; i++) {
+      currentMessage += answer[i];
+      typingMessage.text = currentMessage;
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      setMessages((prevMessages) => [...prevMessages]);
+    }
+
+    setMessages((prevMessages) => [
+      ...prevMessages.filter((message) => message !== typingMessage),
+      { text: currentMessage, sender: "ai" },
+    ]);
+  }, []);
+
+  useEffect(() => {
+    setSuggestions([
+      "How can I get started with Docker?",
+      "Give me an example of a Dockerfile for a simple Python app?",
+      "How does Docker simplify application deployment?",
+      "How do I install Docker on Linux?",
+    ]);
   }, []);
 
   return (
@@ -40,16 +105,24 @@ export const Tars = () => {
             {messages.map((message, index) => (
               <div
                 key={index}
-                className={`text-${
-                  message.sender === "user" ? "end" : "start"
+                className={`${
+                  message.sender === "user" ? "self-end" : "self-start"
                 }`}
               >
                 <Card
                   className={`mb-2 ${
-                    message.sender === "user" ? "bg-primary text-white" : ""
+                    message.sender === "user" ? "bg-primary text-white" : "text-white"
                   }`}
                 >
-                  {message.text}
+                  <div className="flex items-center">
+                    {message.sender === "user" && (
+                      <img src={userImageURL} alt="User" className="w-8 h-8 mr-2 rounded-full" />
+                    )}
+                    {message.sender === "ai" && (
+                      <img src={aiImageURL} alt="AI" className="w-8 h-8 mr-2 rounded-full" />
+                    )}
+                    {message.text}
+                  </div>
                 </Card>
               </div>
             ))}

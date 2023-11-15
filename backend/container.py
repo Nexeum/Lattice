@@ -6,9 +6,7 @@ from fastapi import FastAPI, HTTPException
 import docker
 import requests
 import time
-import random
 import numpy as np
-import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 client = docker.from_env()
@@ -40,7 +38,6 @@ def make_request(ip):
         response_time = time.time() - start_time
 
         if response.status_code == 200:
-            print(f'Response Time: {response_time}')
             return response_time
         else:
             print(f'Error: Received status code {response.status_code}')
@@ -72,27 +69,24 @@ def get_qps(ip, num_requests=100):
     return qps
 
 def start_overload_test(container_id):
-    latencies = []
-    container = client.containers.get(id)
+    container = client.containers.get(container_id)
     ports = container.attrs['NetworkSettings']['Ports']
     if not ports:
-        ip = get_container_ip(id)
+            ip = get_container_ip(id)
     else:
-        port_mapping = next(iter(ports.values()))[0]
-        port = port_mapping['HostPort']
-        ip = f"localhost:{port}"
-        
-    while True:
-        start_time = time.time()
+            port_mapping = next(iter(ports.values()))[0]
+            port = port_mapping['HostPort']
+            ip = f"localhost:{port}"
 
-        try:
-            response = requests.get(f'http://{ip}')
-            response.raise_for_status()
-        except requests.HTTPError:
-            break
+    print(f'IP: {ip}')
+            
+    latencies = []
 
-        end_time = time.time()
-        latency = end_time - start_time
+    test_duration = 120
+    start_time = time.time()
+
+    while (time.time() - start_time) < test_duration:
+        latency = make_request(ip)
         latencies.append(latency)
 
     latencies = np.array(latencies)
@@ -102,6 +96,13 @@ def start_overload_test(container_id):
     mean = np.mean(latencies)
     max_latency = np.max(latencies)
     min_latency = np.min(latencies)
+
+    print(f"p99: {p99}")
+    print(f"p95: {p95}")
+    print(f"p90: {p90}")
+    print(f"mean: {mean}")
+    print(f"max: {max_latency}")
+    print(f"min: {min_latency}")
 
     return {
         "p99": p99,
@@ -114,10 +115,7 @@ def start_overload_test(container_id):
 
 @app.get("/container/{id}/overload")
 async def start_overload_test_endpoint(id: str):
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor() as pool:
-        data = await loop.run_in_executor(pool, start_overload_test, id)
-    return data
+    return start_overload_test(id)
 
 @app.get('/container/{container_id}/ip')
 async def get_container_ip(container_id: str):
