@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Card, Spinner } from "flowbite-react";
 import axios from "axios";
 import { useLocation } from "react-router-dom";
-import { useParams } from "react-router-dom/cjs/react-router-dom.min";
+import { FaCodeBranch, FaTag, FaStar, FaFile } from 'react-icons/fa';
 
 export const Right = () => {
   const location = useLocation();
@@ -12,6 +12,19 @@ export const Right = () => {
   const [showEnvironmentCard, setShowEnvironmentCard] = useState(false);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [packageData, setPackageData] = useState(null);
+  const pathSegments = window.location.pathname.split('/');
+  const id = pathSegments[pathSegments.length - 1];
+  console.log(id);
+  useEffect(() => {
+      const fetchData = async () => {
+          const response = await axios.get(`http://localhost:5003/packages/${id}`);
+          setPackageData(response.data);
+          console.log(response.data);
+      };
+
+      fetchData();
+  }, [id]);
 
   const validationSteps = [
     'Initializing Orchestrator Docker Instance',
@@ -149,6 +162,36 @@ export const Right = () => {
                   <p className="text-xs mt-2 text-gray-600 dark:text-gray-400">
                     {`${service.percentage}% Operational`}
                   </p>
+                </div>
+              ))}
+            </div>
+          </Card>
+        ) : null}
+        {location.pathname.includes("/package") && packageData ? (
+          <Card className="max-w-sm mb-4">
+            <h2 className="text-xl font-bold tracking-tight text-white mt-4">
+              About
+            </h2>
+            <p className="text-white">{packageData.description || 'No description, website, or topics provided.'}</p>
+            <div className="flex items-center space-x-2">
+              <FaCodeBranch className="text-gray-500" />
+              <p className="text-white">{packageData.branches || 0} Branches</p>
+            </div>
+            <div className="flex items-center space-x-2">
+              <FaTag className="text-gray-500" />
+              <p className="text-white">{packageData.tags || 0} Tags</p>
+            </div>
+            <div className="flex items-center space-x-2">
+              <FaStar className="text-gray-500" />
+              <p className="text-white">{packageData.stars || 0} Stars</p>
+            </div>
+            <h2 className="text-xl font-bold tracking-tight text-white mt-4">
+              Languages
+            </h2>
+            <div className="w-full p-4">
+              {packageData.languages && packageData.languages.map((language, index) => (
+                <div key={index} className="w-full h-2 mb-4 rounded bg-gray-800">
+                  <div style={{ width: `${language.percentage}%` }} className={`h-full rounded ${language.color}`}></div>
                 </div>
               ))}
             </div>
