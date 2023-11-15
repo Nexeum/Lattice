@@ -119,6 +119,15 @@ async def start_overload_test_endpoint(id: str):
         data = await loop.run_in_executor(pool, start_overload_test, id)
     return data
 
+@app.get('/container/{container_id}/ip')
+async def get_container_ip(container_id: str):
+    try:
+        container = client.containers.get(container_id)
+        ip_address = container.attrs['NetworkSettings']['IPAddress']
+        return {'ip_address': ip_address}
+    except Exception as e:
+        return {'error': str(e)}
+
 @app.post('/exe/{container_id}/{command}')
 async def execute_command(container_id: str, command: str):
     try:

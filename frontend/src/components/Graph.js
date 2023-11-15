@@ -12,12 +12,25 @@ const calculateLineEnd = (source, target, targetRadius) => {
     };
 };
 
-const createElements = (g, nodes, orchestrator) => {
+const createElements = (g, nodes, orchestrator, orchestratorIP) => {
     const elements = g.selectAll('.element')
         .data([orchestrator, ...nodes])
         .enter()
         .append('g')
-        .attr('class', 'element');
+        .attr('class', 'element')
+
+        elements.each(function (d) {
+            d3.select(this).on('click', () => {
+                if (d.id === orchestrator.id) {
+                    const url = window.location.href.split('/node')[0];
+                    window.location.href = url;
+                } else {
+                    const baseUrl = window.location.href.split('/node')[0];
+                    window.location.href = `${baseUrl}/node/${d.id}`;
+                }
+            });
+        });
+        
 
     elements.append('circle')
         .attr('r', d => d.id === orchestrator.id ? 100 : 60)
@@ -38,7 +51,7 @@ const createElements = (g, nodes, orchestrator) => {
 
     elements.filter(d => d.id === orchestrator.id)
         .select('circle')
-        .attr('r', 100) 
+        .attr('r', 100)
         .attr('fill', '#1F2937')
         .attr('stroke', '#fff')
         .attr('stroke-width', 4);
@@ -50,6 +63,14 @@ const createElements = (g, nodes, orchestrator) => {
         .attr('font-size', '20px')
         .attr('dy', '0.3em')
         .text('Orchestrator');
+
+    elements.filter(d => d.id === orchestrator.id)
+        .append('text')
+        .attr('fill', 'white')
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '12px')
+        .attr('dy', '2em')
+        .text(orchestratorIP);
 
     elements.filter(d => d.id !== orchestrator.id)
         .select('circle')
@@ -78,7 +99,7 @@ const configureSimulation = (nodes, links, orchestrator, onTick) => {
         .on('tick', onTick);
 };
 
-export const Graph = ({ nodes }) => {
+export const Graph = ({ nodes, orchestratorIP }) => {
     const ref = useRef();
     const orchestrator = useMemo(() => ({ id: 'orchestrator', x: 0, y: 0, fx: 0, fy: 0 }), []);
 
@@ -86,7 +107,7 @@ export const Graph = ({ nodes }) => {
         const links = nodes.map(node => ({ source: 'orchestrator', target: node.id }));
         const svg = d3.select(ref.current).attr('viewBox', [-400, -300, 800, 600]);
         const g = svg.append('g');
-        const elements = createElements(g, nodes, orchestrator);
+        const elements = createElements(g, nodes, orchestrator, orchestratorIP);
         const linkElements = createLinks(g, links);
 
         const zoom = d3.zoom()
