@@ -20,7 +20,7 @@ This project provides a streamlined way to orchestrate a collection of APIs buil
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/](https://github.com/)<Nexeum>/Innoxus
+   git clone https://github.com/Nexeum/Innoxus.git
 
 2. **Navigate to the project directory**:
    ```bash
