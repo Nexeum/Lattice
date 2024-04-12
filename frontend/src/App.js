@@ -171,7 +171,18 @@ function App() {
                     component={Node}
                     authenticated={authenticated}
                   />
-
+                  <ProtectedRoute
+                    exact
+                    path="/register"
+                    component={Register}
+                    authenticated={authenticated}
+                  />
+                  <ProtectedRoute
+                    exact
+                    path="/auth"
+                    component={Auth}
+                    authenticated={authenticated}
+                  />
                 </Switch>
               </div>
               <div className="w-1/5">
@@ -181,12 +192,6 @@ function App() {
           </>
         ) : (
           <Switch>
-            {/*            
-             <Route exact path="/">
-              <Auth onAuthenticate={setAuthenticated} />
-            </Route>
-            <Route path="/register" component={Register} /> */
-            }
             <Route exact path="/">
               <Home />
             </Route>
