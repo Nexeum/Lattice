@@ -51,7 +51,7 @@ const Auth = ({ onAuthenticate }) => {
         onAuthenticate(true);
       }
     } catch (error) {
-      setError("Error during login. Please try again.");
+      setError("Error during login. Please try again. ", error);
       console.error(error);
     }
   };
