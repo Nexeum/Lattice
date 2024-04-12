@@ -175,13 +175,11 @@ function App() {
                     exact
                     path="/register"
                     component={Register}
-                    authenticated={authenticated}
                   />
                   <ProtectedRoute
                     exact
                     path="/auth"
                     component={Auth}
-                    authenticated={authenticated}
                   />
                 </Switch>
               </div>

@@ -21,14 +21,14 @@ export const Home = () => {
                         <img src="https://flowbite.com/docs/images/carousel/carousel-5.svg" alt="..." />
                     </Carousel>
                 </div>
-                <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800">
-                    <div className="flex justify-between items-center">
-                        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-                            Main Page Test
-                        </h2>
-                    </div>
-                </Card>
             </div >
+            <Card className="w-full space-y-4 rounded-xl shadow-md dark:bg-gray-800">
+                <div className="flex justify-between items-center">
+                    <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
+                        Main Page Test
+                    </h2>
+                </div>
+            </Card>
         </div >
     );
 };
