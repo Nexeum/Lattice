@@ -42,7 +42,7 @@ const Auth = ({ onAuthenticate }) => {
     e.preventDefault();
     try {
       const response = await axios.post(
-        "http://10.8.8.247:5000/login",
+        "http://127.0.0.1:5000/login",
         credentials,
         { headers: { 'Content-Type': 'application/json' } }
       );

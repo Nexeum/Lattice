@@ -114,7 +114,7 @@ export const Nodesly = () => {
 
   const getUserId = async (token) => {
     try {
-      const response = await axios.get("http://10.8.8.247:5000/getuserid", {
+      const response = await axios.get("http://127.0.0.1:5000/getuserid", {
         headers: {
           Authorization: `Bearer ${token}`,
         },

@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 :: Configuration
 set configFile=.innoxus\config.bat
-set serverURL=http://10.8.8.247:5000
+set serverURL=http://127.0.0.1:5000
 set uploadURL=http://10.8.8.247:5003
 set excludedFiles=innox.bat .innoxus
 

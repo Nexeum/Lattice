@@ -72,7 +72,7 @@ export const Right = () => {
     if (storedToken) {
       setAuthenticated(true);
       axios
-        .get("http://10.8.8.247:5000/userData", {
+        .get("http://127.0.0.1:5000/userData", {
           headers: {
             Authorization: `Bearer ${storedToken}`,
           },
