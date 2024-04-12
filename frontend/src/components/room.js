@@ -19,7 +19,7 @@ export const Room = () => {
   const [orchestratorIP, setOrchestratorIP] = useState('');
 
   useEffect(() => {
-    axios.get(`http://localhost:5002/rooms/${id}`)
+    axios.get(`http://10.8.8.247:5002/rooms/${id}`)
       .then(response => {
         setRoom(response.data);
       })
@@ -27,7 +27,7 @@ export const Room = () => {
         console.error(error);
       });
 
-    axios.get(`http://localhost:5001/container/${id}/ip`)
+    axios.get(`http://10.8.8.247:5001/container/${id}/ip`)
       .then(response => {
         setOrchestratorIP(response.data.ip_address);
         console.log(response.data.ip_address);
@@ -36,7 +36,7 @@ export const Room = () => {
         console.error(error);
       });
 
-    axios.get(`http://localhost:5001/containers/${id}/ps`)
+    axios.get(`http://10.8.8.247:5001/containers/${id}/ps`)
       .then(function (response) {
         const nodes = response.data.output.map(container => ({
           id: container.ID,
@@ -63,7 +63,7 @@ export const Room = () => {
   }, [id]);
 
   const createContainer = () => {
-    axios.get(`http://localhost:5001/container/${id}/${containerName}/${containerImage}/${containerShell}`)
+    axios.get(`http://10.8.8.247:5001/container/${id}/${containerName}/${containerImage}/${containerShell}`)
       .then(function (response) {
         setCreationResult("Container created successfully with output: " + response.data.output);
       })

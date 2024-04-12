@@ -3,8 +3,8 @@ setlocal enabledelayedexpansion
 
 :: Configuration
 set configFile=.innoxus\config.bat
-set serverURL=http://localhost:5000
-set uploadURL=http://localhost:5003
+set serverURL=http://10.8.8.247:5000
+set uploadURL=http://10.8.8.247:5003
 set excludedFiles=innox.bat .innoxus
 
 :: Check if config file exists
@@ -44,7 +44,7 @@ for %%G in (*.*) do (
     )
     if not defined skip (
         :: Upload file
-        curl -X POST -H "Content-Type: multipart/form-data" -F "file=@%%G" http://localhost:5003/packages/%id%/files
+        curl -X POST -H "Content-Type: multipart/form-data" -F "file=@%%G" http://10.8.8.247:5003/packages/%id%/files
     )
 )
 

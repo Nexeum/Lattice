@@ -31,8 +31,8 @@ export const Cli = () => {
     const command = input;
     const urlContainsNode = window.location.pathname.includes('/node/');
     const endpoint = urlContainsNode 
-      ? `http://localhost:5001/node/${out}/${id}/${encodeURIComponent(command)}`
-      : `http://localhost:5001/exe/${id}/${encodeURIComponent(command)}`; 
+      ? `http://10.8.8.247:5001/node/${out}/${id}/${encodeURIComponent(command)}`
+      : `http://10.8.8.247:5001/exe/${id}/${encodeURIComponent(command)}`; 
 
     const response = await axios.post(endpoint);
     setOutput(prevOutput => `${prevOutput}\n$ ${command}\n${response.data.output}`);

@@ -15,7 +15,7 @@ export const Node = () => {
 
     useEffect(() => {
 
-        axios.get(`http://localhost:5001/container/${roomId}/ip`)
+        axios.get(`http://10.8.8.247:5001/container/${roomId}/ip`)
         .then(response => {
           setOrchestratorIP(response.data.ip_address);
           console.log(response.data.ip_address);
@@ -24,7 +24,7 @@ export const Node = () => {
           console.error(error);
         });
 
-        axios.get(`http://localhost:5001/containers/${roomId}/ps`)
+        axios.get(`http://10.8.8.247:5001/containers/${roomId}/ps`)
             .then(function (response) {
                 const nodes = response.data.output.map(container => ({
                     id: container.ID,

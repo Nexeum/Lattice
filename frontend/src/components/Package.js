@@ -10,7 +10,7 @@ export const Package = () => {
 
     useEffect(() => {
         const fetchData = async () => {
-            const response = await axios.get(`http://localhost:5003/packages/${id}`);
+            const response = await axios.get(`http://10.8.8.247:5003/packages/${id}`);
             setPackageData(response.data);
         };
 

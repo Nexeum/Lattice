@@ -19,7 +19,7 @@ export const ContainerDetails = () => {
 
   const startLoadTest = () => {
     setOpenModal(true);
-    axios.get(`http://localhost:5001/container/${id}/overload`)
+    axios.get(`http://10.8.8.247:5001/container/${id}/overload`)
       .then(response => {
         setOverloadData(response.data);
       })
@@ -31,7 +31,7 @@ export const ContainerDetails = () => {
 
   useEffect(() => {
     const intervalId = setInterval(() => {
-      axios.get(`http://localhost:5001/container/${id}/metrics`)
+      axios.get(`http://10.8.8.247:5001/container/${id}/metrics`)
         .then(response => {
           setMemUsage(parseMemUsage(response.data.MemUsage));
           setCpuPercData(prevData => {

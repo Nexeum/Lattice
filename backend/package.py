@@ -19,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = MongoClient('mongodb://localhost:27017/')
+client = MongoClient('mongodb://10.8.8.247:27017/')
 db = client['kubehub']
 collection = db['package']
 fs = gridfs.GridFS(db)

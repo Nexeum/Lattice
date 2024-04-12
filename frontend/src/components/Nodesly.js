@@ -28,7 +28,7 @@ export const DockerRoomCard = ({ roomId, roomName, isPublic, onStateChange, onJo
   const updateRoom = async (roomId, room) => {
     console.log(roomId);
     try {
-      const response = await axios.put(`http://localhost:5002/rooms/${roomId}`, room);
+      const response = await axios.put(`http://10.8.8.247:5002/rooms/${roomId}`, room);
       if (response.data) {
         setRooms(rooms.map(r => r._id === roomId ? { ...r, ...response.data } : r));
       }
@@ -95,7 +95,7 @@ export const Nodesly = () => {
   const history = useHistory();
 
   useEffect(() => {
-    axios.get('http://localhost:5002/rooms')
+    axios.get('http://10.8.8.247:5002/rooms')
       .then(response => {
         setRooms(response.data);
       })
@@ -114,7 +114,7 @@ export const Nodesly = () => {
 
   const getUserId = async (token) => {
     try {
-      const response = await axios.get("http://localhost:5000/getuserid", {
+      const response = await axios.get("http://10.8.8.247:5000/getuserid", {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -128,7 +128,7 @@ export const Nodesly = () => {
 
   const createRoom = async (room) => {
     try {
-      const response = await axios.post('http://localhost:5002/rooms', room);
+      const response = await axios.post('http://10.8.8.247:5002/rooms', room);
       return response.data;
     } catch (error) {
       console.error('There was an error!', error);

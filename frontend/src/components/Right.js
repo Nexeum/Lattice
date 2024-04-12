@@ -23,7 +23,7 @@ export const Right = () => {
   useEffect(() => {
     if (window.location.pathname.includes("/package")) {
       const fetchData = async () => {
-        const response = await axios.get(`http://localhost:5003/packages/${id}`);
+        const response = await axios.get(`http://10.8.8.247:5003/packages/${id}`);
         setPackageData(response.data);
       };
 
@@ -36,7 +36,7 @@ export const Right = () => {
       const calculatedConcurrentClients = qps * averageResponseTime;
       setConcurrentClients(calculatedConcurrentClients);
 
-      axios.get(`http://localhost:5001/container/${id}/aprox`)
+      axios.get(`http://10.8.8.247:5001/container/${id}/aprox`)
         .then(response => {
           const roundedAverageResponseTime = Math.round(response.data.averageResponseTime * 100) / 100;
           const roundedQps = Math.round(response.data.qps);
@@ -72,7 +72,7 @@ export const Right = () => {
     if (storedToken) {
       setAuthenticated(true);
       axios
-        .get("http://localhost:5000/userData", {
+        .get("http://10.8.8.247:5000/userData", {
           headers: {
             Authorization: `Bearer ${storedToken}`,
           },
@@ -90,7 +90,7 @@ export const Right = () => {
     if (location.pathname.includes("/room")) {
       const id = location.pathname.split("/")[2];
       setLoading(true);
-      axios.post(`http://localhost:5001/containermain/${id}`)
+      axios.post(`http://10.8.8.247:5001/containermain/${id}`)
         .then(response => {
           setLoading(false);
           setSuccess(true);

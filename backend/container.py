@@ -76,7 +76,7 @@ def start_overload_test(container_id):
     else:
             port_mapping = next(iter(ports.values()))[0]
             port = port_mapping['HostPort']
-            ip = f"localhost:{port}"
+            ip = f"10.8.8.247:{port}"
 
     print(f'IP: {ip}')
             
@@ -232,7 +232,7 @@ async def read_metrics(id: str):
         else:
             port_mapping = next(iter(ports.values()))[0]
             port = port_mapping['HostPort']
-            ip = f"localhost:{port}"
+            ip = f"10.8.8.247:{port}"
         average_response_time = get_average_response_time(ip)
         qps = get_qps(ip)
 

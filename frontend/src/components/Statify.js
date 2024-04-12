@@ -11,7 +11,7 @@ const useContainers = () => {
   const fetchContainers = async () => {
     setLoading(true);
     try {
-      const response = await axios.get("http://localhost:5001/containers");
+      const response = await axios.get("http://10.8.8.247:5001/containers");
       setContainers(response.data);
     } catch (error) {
       console.error(error);

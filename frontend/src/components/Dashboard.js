@@ -11,7 +11,7 @@ export const Dashboard = () => {
 
   useEffect(() => {
     const fetchPackages = async () => {
-      const response = await axios.get('http://localhost:5003/packages');
+      const response = await axios.get('http://10.8.8.247:5003/packages');
       setPackages(response.data);
       const token = localStorage.getItem("token");
     };
@@ -24,7 +24,7 @@ export const Dashboard = () => {
     e.preventDefault();
     const token = localStorage.getItem("token");
     const userId = await getUserId(token);
-    const response = await axios.post('http://localhost:5003/packages', {
+    const response = await axios.post('http://10.8.8.247:5003/packages', {
       name: packageName,
       description: description,
       language: "Not Recognized",
@@ -40,7 +40,7 @@ export const Dashboard = () => {
 
   const getUserId = async (token) => {
     try {
-      const response = await axios.get("http://localhost:5000/getuserid", {
+      const response = await axios.get("http://10.8.8.247:5000/getuserid", {
         headers: {
           Authorization: `Bearer ${token}`,
         },

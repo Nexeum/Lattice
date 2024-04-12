@@ -25,7 +25,7 @@ app.add_middleware(
 SECRET_KEY = "kubehub"
 
 # Database
-client = MongoClient('mongodb://localhost:27017/')
+client = MongoClient('mongodb://10.8.8.247:27017/')
 db = client['kubehub']
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")

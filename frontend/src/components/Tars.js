@@ -18,7 +18,7 @@ export const Tars = () => {
 
   const fetchAnswer = async (question) => {
     try {
-      const response = await axios.get(`http://localhost:5004/ask`, {
+      const response = await axios.get(`http://10.8.8.247:5004/ask`, {
         params: { question }
       });
       return response.data.answer;
