@@ -15,6 +15,7 @@ import { ContainerDetails } from "./components/ContainerDetails";
 import { Room } from "./components/room";
 import { Package } from "./components/Package";
 import { Node } from "./components/Node";
+import { Home } from "./components/Home";
 
 import "./App.css";
 
@@ -180,10 +181,15 @@ function App() {
           </>
         ) : (
           <Switch>
-            <Route exact path="/">
+            {/*            
+             <Route exact path="/">
               <Auth onAuthenticate={setAuthenticated} />
             </Route>
-            <Route path="/register" component={Register} />
+            <Route path="/register" component={Register} /> */
+            }
+            <Route exact path="/">
+              <Home />
+            </Route>
           </Switch>
         )}
       </Router>
