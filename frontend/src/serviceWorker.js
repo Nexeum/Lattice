@@ -10,9 +10,9 @@
 // To learn more about the benefits of this model and instructions on how to
 // opt-in, read https://bit.ly/CRA-PWA
 
-const is10.8.8.247 = Boolean(
-  window.location.hostname === '10.8.8.247' ||
-    // [::1] is the IPv6 10.8.8.247 address.
+const isLocalhost = Boolean(
+  window.location.hostname === 'localhost' ||
+    // [::1] is the IPv6 localhost address.
     window.location.hostname === '[::1]' ||
     // 127.0.0.0/8 are considered 10.8.8.247 for IPv4.
     window.location.hostname.match(
@@ -34,7 +34,7 @@ export function register(config) {
     window.addEventListener('load', () => {
       const swUrl = `${process.env.PUBLIC_URL}/service-worker.js`;
 
-      if (is10.8.8.247) {
+      if (isLocalhost) {
         // This is running on 10.8.8.247. Let's check if a service worker still exists or not.
         checkValidServiceWorker(swUrl, config);
 
