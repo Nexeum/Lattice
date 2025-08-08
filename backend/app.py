@@ -26,11 +26,12 @@ app.add_middleware(
 )
 
 # Secret key for JWT
-SECRET_KEY = "kubehub"
+SECRET_KEY = "lattice_secret"
 
 # Database
-client = MongoClient('mongodb://10.8.8.247:27017/')
-db = client['kubehub']
+client = MongoClient('mongodb://localhost:27017/')
+
+db = client['lattice_db']
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 

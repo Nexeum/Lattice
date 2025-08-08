@@ -1,5 +1,5 @@
 {
-  "name": "innoxus",
+  "name": "lattice",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -23,6 +23,7 @@
     "eslint-config-react-app": "^7.0.1",
     "flowbite": "^1.8.1",
     "flowbite-react": "^0.6.4",
+    "lucide-react": "^0.530.0",
     "postcss": "^8.4.31",
     "react": "^18.2.0",
     "react-chartjs-2": "^5.2.0",

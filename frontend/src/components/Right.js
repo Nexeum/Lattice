@@ -1,13 +1,22 @@
 import React, { useState, useEffect } from "react";
-import { Card, Spinner } from "flowbite-react";
-import axios from "axios";
-import { useLocation } from "react-router-dom";
-import { FaCodeBranch, FaTag, FaStar, FaFile } from 'react-icons/fa';
+import { 
+  User, 
+  Activity, 
+  CheckCircle, 
+  AlertCircle, 
+  Loader, 
+  Star, 
+  GitBranch, 
+  Tag, 
+  Code,
+  Zap,
+  Clock,
+  TrendingUp,
+  Server
+} from "lucide-react";
 
 export const Right = () => {
-  const location = useLocation();
   const [authenticated, setAuthenticated] = useState(false);
-  const [storedToken, setStoredToken] = useState("");
   const [userData, setUserData] = useState(null);
   const [showEnvironmentCard, setShowEnvironmentCard] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -16,228 +25,286 @@ export const Right = () => {
   const [concurrentClients, setConcurrentClients] = useState(0);
   const [averageResponseTime, setAverageResponseTime] = useState(0);
   const [qps, setQps] = useState(0);
+  const [currentStep, setCurrentStep] = useState(0);
 
-  const pathSegments = window.location.pathname.split('/');
+  // Get current path to determine what to show
+  const currentPath = window.location.pathname;
+  const pathSegments = currentPath.split('/');
   const id = pathSegments[pathSegments.length - 1];
-
-  useEffect(() => {
-    if (window.location.pathname.includes("/package")) {
-      const fetchData = async () => {
-        const response = await axios.get(`http://10.8.8.247:5003/packages/${id}`);
-        setPackageData(response.data);
-      };
-
-      fetchData();
-    }
-  }, [id]);
-
-  useEffect(() => {
-    if (window.location.pathname.includes("/container")) {
-      const calculatedConcurrentClients = qps * averageResponseTime;
-      setConcurrentClients(calculatedConcurrentClients);
-
-      axios.get(`http://10.8.8.247:5001/container/${id}/aprox`)
-        .then(response => {
-          const roundedAverageResponseTime = Math.round(response.data.averageResponseTime * 100) / 100;
-          const roundedQps = Math.round(response.data.qps);
-          setAverageResponseTime(roundedAverageResponseTime);
-          setQps(roundedQps);
-        })
-        .catch(error => {
-          console.error(error);
-        });
-    }
-  }, [id, qps, averageResponseTime]);
 
   const validationSteps = [
     'Initializing Orchestrator Docker Instance',
-    'Configuring Docker Environment',
+    'Configuring Docker Environment', 
     'Integrating Service with Orchestrator',
     'Launching Orchestrator Service'
   ];
 
-  const [apiStatus, setApiStatus] = useState([]);
+  const [apiStatus, setApiStatus] = useState([
+    { label: "AUTH", status: "operational", percentage: 99 },
+    { label: "NLP", status: "operational", percentage: 98 },
+    { label: "Storage", status: "operational", percentage: 95 },
+  ]);
 
+  // Mock user data
   useEffect(() => {
-    const fakeApiStatus = [
-      { label: "AUTH", status: "green", percentage: 85 },
-      { label: "NLP", status: "green", percentage: 98 },
-      { label: "Storage Data", status: "green", percentage: 70 },
-    ];
-    setApiStatus(fakeApiStatus);
+    setUserData({
+      data: {
+        fullname: "John Doe",
+        email: "nexeum@nexeum.com"
+      }
+    });
+    setAuthenticated(true);
   }, []);
 
+  // Mock package data
   useEffect(() => {
-    const storedToken = localStorage.getItem("token");
-    if (storedToken) {
-      setAuthenticated(true);
-      axios
-        .get("http://127.0.0.1:8000/userData", {
-          headers: {
-            Authorization: `Bearer ${storedToken}`,
-          },
-        })
-        .then((response) => {
-          setUserData(response.data);
-        })
-        .catch((error) => {
-          console.error(error);
-        });
+    if (currentPath.includes("/package")) {
+      setPackageData({
+        description: "Advanced container orchestration platform with ML-powered optimization",
+        branches: 5,
+        tags: 12,
+        stars: 142,
+        languages: [
+          { name: "JavaScript", percentage: 45, color: "bg-yellow-400" },
+          { name: "Python", percentage: 30, color: "bg-blue-500" },
+          { name: "Go", percentage: 15, color: "bg-cyan-400" },
+          { name: "Shell", percentage: 10, color: "bg-green-500" }
+        ]
+      });
     }
-  }, [storedToken]);
+  }, [currentPath]);
 
+  // Mock container performance data
   useEffect(() => {
-    if (location.pathname.includes("/room")) {
-      const id = location.pathname.split("/")[2];
+    if (currentPath.includes("/container")) {
+      setConcurrentClients(24);
+      setAverageResponseTime(0.34);
+      setQps(156);
+    }
+  }, [currentPath]);
+
+  // Environment setup simulation
+  useEffect(() => {
+    if (currentPath.includes("/room")) {
+      setShowEnvironmentCard(true);
       setLoading(true);
-      axios.post(`http://10.8.8.247:5001/containermain/${id}`)
-        .then(response => {
+      
+      let stepIndex = 0;
+      const interval = setInterval(() => {
+        setCurrentStep(stepIndex);
+        stepIndex++;
+        
+        if (stepIndex >= validationSteps.length) {
+          clearInterval(interval);
           setLoading(false);
           setSuccess(true);
-          setShowEnvironmentCard(true);
-        })
-        .catch(error => {
-          console.error(error);
-          setLoading(false);
-          setShowEnvironmentCard(false);
-        });
+        }
+      }, 1000);
+
+      return () => clearInterval(interval);
     } else {
       setShowEnvironmentCard(false);
+      setLoading(false);
+      setSuccess(false);
+      setCurrentStep(0);
     }
-  }, [location.pathname]);
-
-  let userDataObject;
-  if (userData && typeof userData === 'string') {
-    userDataObject = JSON.parse(userData);
-  } else {
-    userDataObject = userData;
-  }
+  }, [currentPath]);
 
   return (
-    <div className="rounded-lg p-8">
-      <div className="relative overflow-x-auto">
-        <Card className="max-w-sm mb-4">
-          <div className="flex flex-col items-center pb-10">
-            <img
-              alt="User image"
-              height="96"
-              src="https://th.bing.com/th/id/OIG.q3iFkMBl3odPVneKCIWg?pid=ImgGn"
-              width="96"
-              className="mb-3 rounded-full shadow-lg"
-            />
-            <h5 className="mb-1 text-xl font-medium text-gray-900 dark:text-white">
-              {userDataObject && userDataObject.data && userDataObject.data.fullname ? userDataObject.data.fullname : ""}
-            </h5>
-            <span className="text-sm text-gray-500 dark:text-gray-400">
-              {userDataObject && userDataObject.data && userDataObject.data.email ? userDataObject.data.email : ""}
-            </span>
-          </div>
-        </Card>
-        {showEnvironmentCard ? (
-          <Card className="max-w-sm mb-4">
-            <div className="p-4">
-              <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-4 flex text-center justify-center items-center">
-                Setting up the environment
-              </h2>
-              {validationSteps.map((step, index) => (
-                <div key={index} className="flex items-center justify-center space-x-2">
-                  <p className="text-white">{step}</p>
-                  {loading ? <Spinner /> : success ? <svg
-                    className="h-5 w-5 shrink-0 text-cyan-600 dark:text-cyan-500"
-                    fill="currentColor"
-                    viewBox="0 0 20 20"
-                    xmlns="http://www.w3.org/2000/svg"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-                      clipRule="evenodd"
-                    />
-                  </svg> : null}
-                </div>
-              ))}
+    <div className="w-full h-full bg-gray-50 border-l border-gray-200 overflow-y-auto">
+      <div className="p-6 space-y-6">
+        {/* User Profile Card */}
+        <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+          <div className="flex flex-col items-center text-center">
+            <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center mb-4 shadow-lg">
+              <User className="w-8 h-8 text-white" />
             </div>
-          </Card>
-        ) : null}
-        {location.pathname.includes("/tars") ? (
-          <Card className="max-w-sm mb-4">
-            <div className="p-4">
-              <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-4 text-center">
-                API Status
-              </h2>
-              {apiStatus.map((service, index) => (
-                <div key={index} className="mb-4">
-                  <div className="flex items-center mb-2">
-                    <p className={`text-${service.status}-500`}>{service.label}</p>
-                    <div
-                      className={`w-4 h-4 rounded-full bg-${service.status}-500 ml-2`}
-                    ></div>
+            <h3 className="text-lg font-medium text-gray-900 mb-1">
+              {userData?.data?.fullname || "User"}
+            </h3>
+            <p className="text-sm text-gray-600">
+              {userData?.data?.email || "user@innoxus.com"}
+            </p>
+          </div>
+        </div>
+
+        {/* Environment Setup Card */}
+        {showEnvironmentCard && (
+          <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+            <div className="flex items-center space-x-2 mb-4">
+              <Server className="w-5 h-5 text-blue-600" />
+              <h3 className="text-lg font-medium text-gray-900">Environment Setup</h3>
+            </div>
+            
+            <div className="space-y-3">
+              {validationSteps.map((step, index) => (
+                <div key={index} className="flex items-center space-x-3">
+                  <div className="flex-shrink-0">
+                    {index < currentStep || success ? (
+                      <CheckCircle className="w-5 h-5 text-green-600" />
+                    ) : index === currentStep && loading ? (
+                      <Loader className="w-5 h-5 text-blue-600 animate-spin" />
+                    ) : (
+                      <div className="w-5 h-5 rounded-full border-2 border-gray-300"></div>
+                    )}
                   </div>
-                  <div className={`bg-gray-200 dark:bg-gray-800 h-4 rounded-lg`}>
-                    <div
-                      className={`h-full rounded-lg bg-${service.status}-500`}
-                      style={{
-                        width: `100%`,
-                        backgroundImage: `linear-gradient(90deg, green ${service.percentage}%, red ${service.percentage}%)`
-                      }}
-                    ></div>
-                  </div>
-                  <p className="text-xs mt-2 text-gray-600 dark:text-gray-400">
-                    {`${service.percentage}% Operational`}
+                  <p className={`text-sm ${
+                    index <= currentStep || success ? "text-gray-900" : "text-gray-500"
+                  }`}>
+                    {step}
                   </p>
                 </div>
               ))}
             </div>
-          </Card>
-        ) : null}
-        {location.pathname.includes("/package") && packageData ? (
-          <Card className="max-w-sm mb-4">
-            <h2 className="text-xl font-bold tracking-tight text-white mt-4">
-              About
-            </h2>
-            <p className="text-white">{packageData.description || 'No description, website, or topics provided.'}</p>
-            <div className="flex items-center space-x-2">
-              <FaCodeBranch className="text-gray-500" />
-              <p className="text-white">{packageData.branches || 0} Branches</p>
+          </div>
+        )}
+
+        {/* API Status Card */}
+        {currentPath.includes("/tars") && (
+          <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+            <div className="flex items-center space-x-2 mb-4">
+              <Activity className="w-5 h-5 text-green-600" />
+              <h3 className="text-lg font-medium text-gray-900">API Status</h3>
             </div>
-            <div className="flex items-center space-x-2">
-              <FaTag className="text-gray-500" />
-              <p className="text-white">{packageData.tags || 0} Tags</p>
-            </div>
-            <div className="flex items-center space-x-2">
-              <FaStar className="text-gray-500" />
-              <p className="text-white">{packageData.stars || 0} Stars</p>
-            </div>
-            <h2 className="text-xl font-bold tracking-tight text-white mt-4">
-              Languages
-            </h2>
-            <div className="w-full p-4">
-              {packageData.languages && packageData.languages.map((language, index) => (
-                <div key={index} className="w-full h-2 mb-4 rounded bg-gray-800">
-                  <div style={{ width: `${language.percentage}%` }} className={`h-full rounded ${language.color}`}></div>
+            
+            <div className="space-y-4">
+              {apiStatus.map((service, index) => (
+                <div key={index}>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center space-x-2">
+                      <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      <span className="text-sm font-medium text-gray-900">{service.label}</span>
+                    </div>
+                    <span className="text-xs text-gray-600">{service.percentage}%</span>
+                  </div>
+                  <div className="w-full bg-gray-100 rounded-full h-2">
+                    <div 
+                      className="bg-green-500 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${service.percentage}%` }}
+                    ></div>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">Operational</p>
                 </div>
               ))}
             </div>
-          </Card>
-        ) : null}
-        {location.pathname.includes("/container") ? (
-          <Card className="max-w-sm mb-4">
-            <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white mb-4">
-              Performance Test
-            </h1>
-            <Card className="flex-grow space-y-4 rounded-xl shadow-md dark:bg-gray-800">
-              <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
-                Concurrent Clients: {concurrentClients}
-              </h3>
-              <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
-                Average Response Time: {averageResponseTime} seconds
-              </h3>
-              <h3 className="text-xl font-bold tracking-tight text-gray-900 dark:text-white">
-                Queries Per Second: {qps}
-              </h3>
-            </Card>
-          </Card>
-        ) : null}
+          </div>
+        )}
+
+        {/* Package Info Card */}
+        {currentPath.includes("/package") && packageData && (
+          <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+            <h3 className="text-lg font-medium text-gray-900 mb-4">About</h3>
+            
+            <p className="text-gray-600 text-sm leading-relaxed mb-4">
+              {packageData.description}
+            </p>
+            
+            <div className="space-y-3 mb-6">
+              <div className="flex items-center space-x-3">
+                <GitBranch className="w-4 h-4 text-gray-500" />
+                <span className="text-sm text-gray-700">{packageData.branches} Branches</span>
+              </div>
+              <div className="flex items-center space-x-3">
+                <Tag className="w-4 h-4 text-gray-500" />
+                <span className="text-sm text-gray-700">{packageData.tags} Tags</span>
+              </div>
+              <div className="flex items-center space-x-3">
+                <Star className="w-4 h-4 text-gray-500" />
+                <span className="text-sm text-gray-700">{packageData.stars} Stars</span>
+              </div>
+            </div>
+            
+            <div>
+              <h4 className="text-md font-medium text-gray-900 mb-3">Languages</h4>
+              <div className="space-y-2">
+                {packageData.languages?.map((language, index) => (
+                  <div key={index}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-medium text-gray-700">{language.name}</span>
+                      <span className="text-xs text-gray-500">{language.percentage}%</span>
+                    </div>
+                    <div className="w-full bg-gray-100 rounded-full h-1.5">
+                      <div 
+                        className={`h-1.5 rounded-full ${language.color}`}
+                        style={{ width: `${language.percentage}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Performance Metrics Card */}
+        {currentPath.includes("/container") && (
+          <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+            <div className="flex items-center space-x-2 mb-4">
+              <TrendingUp className="w-5 h-5 text-purple-600" />
+              <h3 className="text-lg font-medium text-gray-900">Performance</h3>
+            </div>
+            
+            <div className="space-y-4">
+              <div className="bg-gray-50 rounded-xl p-4">
+                <div className="flex items-center space-x-2 mb-1">
+                  <Zap className="w-4 h-4 text-blue-600" />
+                  <span className="text-xs font-medium text-gray-600 uppercase tracking-wide">Concurrent Clients</span>
+                </div>
+                <p className="text-2xl font-light text-gray-900">{concurrentClients}</p>
+              </div>
+              
+              <div className="bg-gray-50 rounded-xl p-4">
+                <div className="flex items-center space-x-2 mb-1">
+                  <Clock className="w-4 h-4 text-green-600" />
+                  <span className="text-xs font-medium text-gray-600 uppercase tracking-wide">Avg Response Time</span>
+                </div>
+                <p className="text-2xl font-light text-gray-900">{averageResponseTime}s</p>
+              </div>
+              
+              <div className="bg-gray-50 rounded-xl p-4">
+                <div className="flex items-center space-x-2 mb-1">
+                  <Activity className="w-4 h-4 text-purple-600" />
+                  <span className="text-xs font-medium text-gray-600 uppercase tracking-wide">Queries/Second</span>
+                </div>
+                <p className="text-2xl font-light text-gray-900">{qps}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* System Health Card - Always visible */}
+        <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+          <div className="flex items-center space-x-2 mb-4">
+            <Activity className="w-5 h-5 text-green-600" />
+            <h3 className="text-lg font-medium text-gray-900">System Health</h3>
+          </div>
+          
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">CPU Usage</span>
+              <span className="text-sm font-medium text-gray-900">32%</span>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div className="bg-blue-500 h-2 rounded-full" style={{ width: '32%' }}></div>
+            </div>
+            
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">Memory</span>
+              <span className="text-sm font-medium text-gray-900">68%</span>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div className="bg-yellow-500 h-2 rounded-full" style={{ width: '68%' }}></div>
+            </div>
+            
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">Storage</span>
+              <span className="text-sm font-medium text-gray-900">45%</span>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div className="bg-green-500 h-2 rounded-full" style={{ width: '45%' }}></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
