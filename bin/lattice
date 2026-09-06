@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+#
+# lattice — command-line client for the Lattice local services.
+#
+# Services (override with env vars if needed):
+#   auth        LATTICE_AUTH_URL        default http://localhost:5005
+#   containers  LATTICE_CONTAINERS_URL  default http://localhost:5001
+#   packages    LATTICE_PACKAGES_URL    default http://localhost:5003
+#
+# Requires: curl, python3
+
+set -euo pipefail
+
+AUTH_URL="${LATTICE_AUTH_URL:-http://localhost:5005}"
+CONTAINERS_URL="${LATTICE_CONTAINERS_URL:-http://localhost:5001}"
+PACKAGES_URL="${LATTICE_PACKAGES_URL:-http://localhost:5003}"
+
+CONFIG_DIR="${HOME}/.lattice"
+CONFIG_FILE="${CONFIG_DIR}/config"
+CURL_TIMEOUT=5
+
+# ---------------------------------------------------------------- utilities
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+require_deps() {
+  command -v curl >/dev/null 2>&1 || die "curl is required but not found in PATH"
+  command -v python3 >/dev/null 2>&1 || die "python3 is required but not found in PATH"
+}
+
+service_name_for_url() {
+  case "$1" in
+    "$AUTH_URL"*) echo "auth service (:${AUTH_URL##*:})" ;;
+    "$CONTAINERS_URL"*) echo "containers service (:${CONTAINERS_URL##*:})" ;;
+    "$PACKAGES_URL"*) echo "packages service (:${PACKAGES_URL##*:})" ;;
+    *) echo "service" ;;
+  esac
+}
+
+saved_token() {
+  if [ -f "$CONFIG_FILE" ]; then
+    cat "$CONFIG_FILE"
+  fi
+}
+
+# request METHOD URL [extra curl args...]
+# Sets the globals BODY and HTTP_STATUS (runs in the current shell, not a
+# subshell, so the results are visible to the caller).
+# Returns 1 (with a friendly message) if the service is unreachable.
+HTTP_STATUS=""
+BODY=""
+request() {
+  local method="$1" url="$2"
+  shift 2
+
+  local args=(-sS --max-time "$CURL_TIMEOUT" -X "$method")
+  local token
+  token="$(saved_token)"
+  if [ -n "$token" ]; then
+    args+=(-H "Authorization: Bearer ${token}")
+  fi
+
+  local tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/lattice.XXXXXX")
+  HTTP_STATUS=""
+  BODY=""
+  if ! HTTP_STATUS=$(curl "${args[@]}" -o "$tmp" -w '%{http_code}' "$@" "$url" 2>/dev/null); then
+    rm -f "$tmp"
+    echo "Could not reach $(service_name_for_url "$url")." >&2
+    echo "Is it running? (tried: ${url})" >&2
+    return 1
+  fi
+  BODY=$(cat "$tmp")
+  rm -f "$tmp"
+}
+
+json_get() { # json_get <key> — reads JSON object from stdin, prints value of key
+  python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except (ValueError, EOFError):
+    sys.exit(1)
+value = data.get(sys.argv[1], "") if isinstance(data, dict) else ""
+print(value if value is not None else "")
+' "$1"
+}
+
+urlencode() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+read_password() { # read_password <prompt> — result in REPLY_PASSWORD
+  printf '%s' "$1" >&2
+  read -rs REPLY_PASSWORD
+  echo >&2
+  [ -n "$REPLY_PASSWORD" ] || die "password must not be empty"
+}
+
+credentials_payload() { # credentials_payload <email> <password>
+  python3 -c 'import json, sys; print(json.dumps({"email": sys.argv[1], "password": sys.argv[2]}))' "$1" "$2"
+}
+
+# ----------------------------------------------------------------- commands
+
+cmd_login() {
+  [ $# -eq 1 ] || die "usage: lattice login <email>"
+  local email="$1"
+  read_password "Password for ${email}: "
+
+  request POST "${AUTH_URL}/login" \
+    -H "Content-Type: application/json" \
+    -d "$(credentials_payload "$email" "$REPLY_PASSWORD")" || exit 1
+
+  if [ "$HTTP_STATUS" != "200" ]; then
+    die "login failed (HTTP ${HTTP_STATUS}): ${BODY}"
+  fi
+
+  local token
+  token=$(printf '%s' "$BODY" | json_get token)
+  [ -n "$token" ] || die "login response did not contain a token: ${BODY}"
+
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+  printf '%s' "$token" > "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+  echo "Logged in as ${email}. Token saved to ${CONFIG_FILE}."
+}
+
+cmd_register() {
+  [ $# -eq 1 ] || die "usage: lattice register <email>"
+  local email="$1"
+  read_password "Password for ${email}: "
+
+  request POST "${AUTH_URL}/register" \
+    -H "Content-Type: application/json" \
+    -d "$(credentials_payload "$email" "$REPLY_PASSWORD")" || exit 1
+
+  if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
+    die "registration failed (HTTP ${HTTP_STATUS}): ${BODY}"
+  fi
+  echo "Registered ${email}. Now run: lattice login ${email}"
+}
+
+cmd_packages() {
+  request GET "${PACKAGES_URL}/packages" || exit 1
+  [ "$HTTP_STATUS" = "200" ] || die "could not list packages (HTTP ${HTTP_STATUS}): ${BODY}"
+
+  printf '%s' "$BODY" | python3 -c '
+import json, sys
+packages = json.load(sys.stdin)
+rows = [("ID", "NAME", "VERSION", "FILES")]
+for p in packages:
+    rows.append((
+        str(p.get("_id", "")),
+        str(p.get("name", "")),
+        str(p.get("version", "")),
+        str(len(p.get("files", []) or [])),
+    ))
+widths = [max(len(r[i]) for r in rows) for i in range(4)]
+for r in rows:
+    print("  ".join(col.ljust(widths[i]) for i, col in enumerate(r)))
+if len(rows) == 1:
+    print("(no packages)")
+'
+}
+
+cmd_create() {
+  [ $# -ge 1 ] || die "usage: lattice create <name> [--version X] [--description \"...\"]"
+  local name="$1"
+  shift
+  local version="" description=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --version)
+        [ $# -ge 2 ] || die "--version requires a value"
+        version="$2"; shift 2 ;;
+      --description)
+        [ $# -ge 2 ] || die "--description requires a value"
+        description="$2"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  local payload
+  payload=$(python3 -c '
+import json, sys
+pkg = {"name": sys.argv[1]}
+if sys.argv[2]:
+    pkg["version"] = sys.argv[2]
+if sys.argv[3]:
+    pkg["description"] = sys.argv[3]
+print(json.dumps(pkg))
+' "$name" "$version" "$description")
+
+  request POST "${PACKAGES_URL}/packages" \
+    -H "Content-Type: application/json" \
+    -d "$payload" || exit 1
+  [ "$HTTP_STATUS" = "200" ] || die "could not create package (HTTP ${HTTP_STATUS}): ${BODY}"
+
+  local id
+  id=$(printf '%s' "$BODY" | json_get _id)
+  [ -n "$id" ] || die "unexpected response: ${BODY}"
+  echo "Created package '${name}' with id: ${id}"
+  echo "Push files from your plugin directory with: lattice push ${id}"
+}
+
+cmd_push() {
+  [ $# -eq 1 ] || die "usage: lattice push <package_id>"
+  local package_id="$1"
+  local self_name
+  self_name=$(basename "$0")
+
+  local uploaded=0 failed=0 file
+  for file in *; do
+    [ -f "$file" ] || continue                     # regular files only
+    case "$file" in
+      .*|node_modules|"$self_name"|lattice) continue ;;  # skip hidden, deps, this script
+    esac
+
+    if request POST "${PACKAGES_URL}/packages/${package_id}/files" \
+         -F "file=@${file}" && [ "$HTTP_STATUS" = "200" ]; then
+      echo "  [ok]   ${file}"
+      uploaded=$((uploaded + 1))
+    else
+      echo "  [fail] ${file} (HTTP ${HTTP_STATUS:-?}): ${BODY:-no response}"
+      failed=$((failed + 1))
+    fi
+  done
+
+  if [ $((uploaded + failed)) -eq 0 ]; then
+    die "no files to push in $(pwd)"
+  fi
+  if [ "$failed" -gt 0 ]; then
+    echo "Pushed ${uploaded} file(s) to package ${package_id}, ${failed} failed."
+    exit 1
+  fi
+  echo "Pushed ${uploaded} file(s) to package ${package_id}."
+}
+
+cmd_containers() {
+  request GET "${CONTAINERS_URL}/containers" || exit 1
+  [ "$HTTP_STATUS" = "200" ] || die "could not list containers (HTTP ${HTTP_STATUS}): ${BODY}"
+
+  printf '%s' "$BODY" | python3 -c '
+import json, sys
+containers = json.load(sys.stdin)
+rows = [("ID", "NAME", "IMAGE", "STATUS")]
+for c in containers:
+    rows.append((
+        str(c.get("ID", ""))[:12],
+        str(c.get("Names", "")),
+        str(c.get("Image", "")),
+        str(c.get("Status", "")),
+    ))
+widths = [max(len(r[i]) for r in rows) for i in range(4)]
+for r in rows:
+    print("  ".join(col.ljust(widths[i]) for i, col in enumerate(r)))
+if len(rows) == 1:
+    print("(no containers)")
+'
+}
+
+print_install_result() { # reads install response JSON from stdin
+  python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+print("Installed:", result.get("installed", "?"))
+if result.get("target"):
+    print("Target:   ", result["target"])
+print("Path:     ", result.get("path", "?"))
+print("Files:    ", ", ".join(result.get("files", [])))
+output = result.get("installOutput")
+if output:
+    print("install.sh output:")
+    print(output)
+else:
+    print("(no install.sh in package — files copied only)")
+'
+}
+
+cmd_install() {
+  if [ $# -eq 2 ]; then
+    local package_id="$1" container_id="$2"
+    request POST "${CONTAINERS_URL}/container/${container_id}/install/${package_id}" || exit 1
+  elif [ $# -eq 3 ]; then
+    local package_id="$1" node_id="$2" child_id="$3"
+    request POST "${CONTAINERS_URL}/node/${node_id}/${child_id}/install/${package_id}" || exit 1
+  else
+    die "usage: lattice install <package_id> <container_id>
+       lattice install <package_id> <node_id> <child_id>"
+  fi
+
+  [ "$HTTP_STATUS" = "200" ] || die "install failed (HTTP ${HTTP_STATUS}): ${BODY}"
+  printf '%s' "$BODY" | print_install_result
+}
+
+cmd_exec() {
+  [ $# -ge 2 ] || die "usage: lattice exec <container_id> <command...>"
+  local container_id="$1"
+  shift
+  local encoded
+  encoded=$(urlencode "$*")
+
+  request POST "${CONTAINERS_URL}/exe/${container_id}/${encoded}" || exit 1
+  [ "$HTTP_STATUS" = "200" ] || die "exec failed (HTTP ${HTTP_STATUS}): ${BODY}"
+  printf '%s' "$BODY" | json_get output
+}
+
+cmd_help() {
+  cat <<EOF
+lattice — CLI for the Lattice local container/plugin services
+
+Usage:
+  lattice login <email>                        Log in and cache the token (~/.lattice/config)
+  lattice register <email>                     Create a new user
+  lattice packages                             List plugin packages
+  lattice create <name> [--version X] [--description "..."]
+                                               Create a package, prints its id
+  lattice push <package_id>                    Upload every file in the current directory
+  lattice containers                           List local Docker containers
+  lattice install <package_id> <container_id>  Install a package into a container
+  lattice install <package_id> <node> <child>  Install into a nested (DinD) container
+  lattice exec <container_id> <command...>     Run a command inside a container
+  lattice help                                 Show this help
+
+Services (override via env vars):
+  auth        ${AUTH_URL}   (\$LATTICE_AUTH_URL)
+  containers  ${CONTAINERS_URL}   (\$LATTICE_CONTAINERS_URL)
+  packages    ${PACKAGES_URL}   (\$LATTICE_PACKAGES_URL)
+
+Typical flow:
+  lattice login dev@example.com
+  lattice create my-plugin --version 1.0.0
+  cd my-plugin/ && lattice push <package_id>
+  lattice containers
+  lattice install <package_id> <container_id>
+EOF
+}
+
+# --------------------------------------------------------------------- main
+
+main() {
+  require_deps
+  local command="${1:-help}"
+  [ $# -gt 0 ] && shift
+
+  case "$command" in
+    login)      cmd_login "$@" ;;
+    register)   cmd_register "$@" ;;
+    packages)   cmd_packages "$@" ;;
+    create)     cmd_create "$@" ;;
+    push)       cmd_push "$@" ;;
+    containers) cmd_containers "$@" ;;
+    install)    cmd_install "$@" ;;
+    exec)       cmd_exec "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)
+      echo "Unknown command: ${command}" >&2
+      echo >&2
+      cmd_help >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

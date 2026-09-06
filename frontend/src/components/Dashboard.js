@@ -1,128 +1,136 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useHistory } from "react-router-dom";
-import { 
-  Plus, 
-  Package, 
-  Star, 
-  Code, 
-  Calendar, 
-  TrendingUp, 
-  Users, 
+import {
+  Plus,
+  Package,
+  Code,
+  Tag,
   Activity,
+  StopCircle,
+  Network,
+  AlertTriangle,
   X,
   Search,
-  Filter,
   ArrowRight
 } from "lucide-react";
+
+const PACKAGES_API = "http://localhost:5003";
+const ENGINE_API = "http://localhost:5001";
+const MAX_VISIBLE_TAGS = 4;
 
 export const Dashboard = () => {
   const history = useHistory();
   const [openModal, setOpenModal] = useState(false);
   const [packageName, setPackageName] = useState("");
   const [description, setDescription] = useState("");
+  const [version, setVersion] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState(null);
+
   const [packages, setPackages] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [packagesLoading, setPackagesLoading] = useState(true);
+  const [packagesError, setPackagesError] = useState(null);
+
+  const [containers, setContainers] = useState([]);
+  const [containersLoading, setContainersLoading] = useState(true);
+  const [containersError, setContainersError] = useState(null);
+
+  const [networks, setNetworks] = useState([]);
+  const [networksLoading, setNetworksLoading] = useState(true);
+  const [networksError, setNetworksError] = useState(null);
+
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterActive, setFilterActive] = useState("all");
+  const [languageFilter, setLanguageFilter] = useState("all");
 
-  // Mock data for demonstration - replace with actual API calls
-  useEffect(() => {
-    const fetchPackages = async () => {
-      setLoading(true);
-      try {
-        // Simulate API call
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Mock data - replace with actual API call
-        const mockPackages = [
-          {
-            _id: "1",
-            name: "redis-connector",
-            description: "Redis database connector plugin for seamless caching integration",
-            language: "Python",
-            stars: 42,
-            created_at: "2024-01-15",
-            containers: 3,
-            status: "active",
-            type: "Database Plugin"
-          },
-          {
-            _id: "2", 
-            name: "nginx-lb",
-            description: "Nginx load balancer plugin with auto-scaling and health checks",
-            language: "Nginx Config",
-            stars: 87,
-            created_at: "2024-01-10",
-            containers: 8,
-            status: "active",
-            type: "Load Balancer"
-          },
-          {
-            _id: "3",
-            name: "log-aggregator",
-            description: "Centralized logging plugin for container log collection and analysis",
-            language: "Go",
-            stars: 23,
-            created_at: "2024-01-05",
-            containers: 2,
-            status: "stopped",
-            type: "Monitoring Plugin"
-          },
-          {
-            _id: "4",
-            name: "auth-middleware",
-            description: "JWT authentication middleware plugin for secure API endpoints",
-            language: "Node.js",
-            stars: 156,
-            created_at: "2024-01-20",
-            containers: 12,
-            status: "active",
-            type: "Security Plugin"
-          }
-        ];
-        
-        setPackages(mockPackages);
-      } catch (error) {
-        console.error("Error fetching packages:", error);
-      } finally {
-        setLoading(false);
+  const fetchPackages = useCallback(async () => {
+    setPackagesLoading(true);
+    setPackagesError(null);
+    try {
+      const response = await fetch(`${PACKAGES_API}/packages`);
+      if (!response.ok) {
+        throw new Error(`Packages request failed (${response.status})`);
       }
-    };
-
-    fetchPackages();
+      const data = await response.json();
+      setPackages(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Error fetching packages:", error);
+      setPackagesError("Could not load plugins. Is the package service running on port 5003?");
+    } finally {
+      setPackagesLoading(false);
+    }
   }, []);
+
+  const fetchContainers = useCallback(async () => {
+    setContainersLoading(true);
+    setContainersError(null);
+    try {
+      const response = await fetch(`${ENGINE_API}/containers`);
+      if (!response.ok) {
+        throw new Error(`Containers request failed (${response.status})`);
+      }
+      const data = await response.json();
+      setContainers(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Error fetching containers:", error);
+      setContainersError("Could not load containers.");
+    } finally {
+      setContainersLoading(false);
+    }
+  }, []);
+
+  const fetchTopology = useCallback(async () => {
+    setNetworksLoading(true);
+    setNetworksError(null);
+    try {
+      const response = await fetch(`${ENGINE_API}/topology`);
+      if (!response.ok) {
+        throw new Error(`Topology request failed (${response.status})`);
+      }
+      const data = await response.json();
+      setNetworks(data && Array.isArray(data.networks) ? data.networks : []);
+    } catch (error) {
+      console.error("Error fetching topology:", error);
+      setNetworksError("Could not load networks.");
+    } finally {
+      setNetworksLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPackages();
+    fetchContainers();
+    fetchTopology();
+  }, [fetchPackages, fetchContainers, fetchTopology]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setLoading(true);
-    
+    setCreating(true);
+    setCreateError(null);
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const newPackage = {
-        _id: Date.now().toString(),
-        name: packageName,
-        description: description,
-        language: "Not Recognized",
-        stars: 0,
-        created_at: new Date().toISOString().split('T')[0],
-        containers: 0,
-        status: "inactive",
-        type: "Custom Plugin"
+      const trimmedVersion = version.trim();
+      const payload = {
+        name: packageName.trim(),
+        description: description.trim(),
+        ...(trimmedVersion ? { version: trimmedVersion } : {})
       };
-      
-      setPackages(prev => [newPackage, ...prev]);
+      const response = await fetch(`${PACKAGES_API}/packages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        throw new Error(`Create request failed (${response.status})`);
+      }
       setOpenModal(false);
       setPackageName("");
       setDescription("");
-      
-      // Navigate to package detail page
-      history.push(`/package/${newPackage._id}`);
+      setVersion("");
+      await fetchPackages();
     } catch (error) {
       console.error("Error creating package:", error);
+      setCreateError("Could not create the plugin. Please try again.");
     } finally {
-      setLoading(false);
+      setCreating(false);
     }
   };
 
@@ -130,43 +138,54 @@ export const Dashboard = () => {
     history.push(`/package/${packageId}`);
   };
 
-  const filteredPackages = packages.filter(pkg => {
-    const matchesSearch = pkg.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         pkg.description.toLowerCase().includes(searchTerm.toLowerCase());
-    
-    if (filterActive === "all") return matchesSearch;
-    if (filterActive === "active") return matchesSearch && pkg.status === "active";
-    if (filterActive === "stopped") return matchesSearch && pkg.status === "stopped";
-    
-    return matchesSearch;
+  const languages = [...new Set(packages.map((pkg) => pkg.language).filter(Boolean))].sort();
+
+  const filteredPackages = packages.filter((pkg) => {
+    const term = searchTerm.toLowerCase();
+    const matchesSearch =
+      (pkg.name || "").toLowerCase().includes(term) ||
+      (pkg.description || "").toLowerCase().includes(term);
+    const matchesLanguage = languageFilter === "all" || pkg.language === languageFilter;
+    return matchesSearch && matchesLanguage;
   });
+
+  const runningContainers = containers.filter((c) => c.Status === "running").length;
+  const stoppedContainers = containers.length - runningContainers;
+
+  const statValue = (loading, error, value) => {
+    if (loading) return "…";
+    if (error) return "—";
+    return value;
+  };
 
   const stats = [
     {
       label: "Total Plugins",
-      value: packages.length,
+      value: statValue(packagesLoading, packagesError, packages.length),
       icon: Package,
       color: "blue"
     },
     {
-      label: "Active Containers",
-      value: packages.reduce((sum, pkg) => sum + pkg.containers, 0),
+      label: "Running Containers",
+      value: statValue(containersLoading, containersError, runningContainers),
       icon: Activity,
       color: "green"
     },
     {
-      label: "Total Stars",
-      value: packages.reduce((sum, pkg) => sum + pkg.stars, 0),
-      icon: Star,
+      label: "Stopped Containers",
+      value: statValue(containersLoading, containersError, stoppedContainers),
+      icon: StopCircle,
       color: "yellow"
     },
     {
-      label: "Contributors",
-      value: 12,
-      icon: Users,
+      label: "Docker Networks",
+      value: statValue(networksLoading, networksError, networks.length),
+      icon: Network,
       color: "purple"
     }
   ];
+
+  const infraErrors = [containersError, networksError].filter(Boolean);
 
   return (
     <div className="min-h-screen bg-gray-50 pt-16">
@@ -189,8 +208,8 @@ export const Dashboard = () => {
 
           {/* Stats Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-            {stats.map((stat, index) => (
-              <div key={index} className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+            {stats.map((stat) => (
+              <div key={stat.label} className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-2xl font-light text-gray-900 mb-1">{stat.value}</p>
@@ -213,6 +232,18 @@ export const Dashboard = () => {
               </div>
             ))}
           </div>
+
+          {/* Infra fetch errors */}
+          {infraErrors.length > 0 && (
+            <div className="flex items-start space-x-3 bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-8">
+              <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+              <div className="text-sm text-amber-800">
+                {infraErrors.map((message) => (
+                  <p key={message}>{message}</p>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Packages Section */}
@@ -221,12 +252,14 @@ export const Dashboard = () => {
           <div className="p-6 border-b border-gray-100">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
               <h2 className="text-xl font-medium text-gray-900">Available Plugins</h2>
-              
+
               <div className="flex items-center space-x-3">
                 {/* Search */}
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
                   <input
+                    autoComplete="off"
+                    name="no-autofill"
                     type="text"
                     placeholder="Search plugins..."
                     value={searchTerm}
@@ -234,16 +267,17 @@ export const Dashboard = () => {
                     className="pl-10 pr-4 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-black focus:border-transparent outline-none transition-all duration-200 text-sm"
                   />
                 </div>
-                
-                {/* Filter */}
+
+                {/* Language filter */}
                 <select
-                  value={filterActive}
-                  onChange={(e) => setFilterActive(e.target.value)}
+                  value={languageFilter}
+                  onChange={(e) => setLanguageFilter(e.target.value)}
                   className="px-4 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-black focus:border-transparent outline-none transition-all duration-200 text-sm"
                 >
-                  <option value="all">All Status</option>
-                  <option value="active">Active</option>
-                  <option value="stopped">Stopped</option>
+                  <option value="all">All Languages</option>
+                  {languages.map((language) => (
+                    <option key={language} value={language}>{language}</option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -251,9 +285,21 @@ export const Dashboard = () => {
 
           {/* Packages List */}
           <div className="p-6">
-            {loading ? (
+            {packagesLoading ? (
               <div className="flex items-center justify-center py-12">
                 <div className="w-8 h-8 border-2 border-gray-200 border-t-black rounded-full animate-spin"></div>
+              </div>
+            ) : packagesError ? (
+              <div className="text-center py-12">
+                <AlertTriangle className="w-12 h-12 text-amber-400 mx-auto mb-4" />
+                <h3 className="text-lg font-medium text-gray-900 mb-2">Couldn't load plugins</h3>
+                <p className="text-gray-600 mb-6">{packagesError}</p>
+                <button
+                  onClick={fetchPackages}
+                  className="px-6 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium"
+                >
+                  Retry
+                </button>
               </div>
             ) : filteredPackages.length > 0 ? (
               <div className="space-y-4">
@@ -265,46 +311,58 @@ export const Dashboard = () => {
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <div className="flex items-center space-x-3 mb-2">
+                        <div className="flex items-center flex-wrap gap-2 mb-2">
                           <h3 className="text-lg font-medium text-gray-900 group-hover:text-black">
-                            {pkg.name}
+                            {pkg.name || "Unnamed plugin"}
                           </h3>
-                          <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
-                            {pkg.type}
-                          </span>
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                            pkg.status === 'active' 
-                              ? 'bg-green-100 text-green-700'
-                              : 'bg-gray-100 text-gray-600'
-                          }`}>
-                            {pkg.status}
-                          </span>
+                          {pkg.type && (
+                            <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
+                              {pkg.type}
+                            </span>
+                          )}
+                          {pkg.version && (
+                            <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded-full text-xs font-medium">
+                              v{pkg.version}
+                            </span>
+                          )}
                         </div>
-                        
-                        <p className="text-gray-600 mb-3 leading-relaxed">
-                          {pkg.description}
-                        </p>
-                        
-                        <div className="flex items-center space-x-6 text-sm text-gray-500">
-                          <div className="flex items-center space-x-1">
-                            <Code className="w-4 h-4" />
-                            <span>{pkg.language}</span>
-                          </div>
-                          <div className="flex items-center space-x-1">
-                            <Star className="w-4 h-4" />
-                            <span>{pkg.stars}</span>
-                          </div>
-                          <div className="flex items-center space-x-1">
-                            <Activity className="w-4 h-4" />
-                            <span>{pkg.containers} installations</span>
-                          </div>
-                          <div className="flex items-center space-x-1">
-                            <Calendar className="w-4 h-4" />
-                            <span>{pkg.created_at}</span>
-                          </div>
+
+                        {pkg.description && (
+                          <p className="text-gray-600 mb-3 leading-relaxed">
+                            {pkg.description}
+                          </p>
+                        )}
+
+                        <div className="flex items-center flex-wrap gap-x-6 gap-y-2 text-sm text-gray-500">
+                          {pkg.language && (
+                            <div className="flex items-center space-x-1">
+                              <Code className="w-4 h-4" />
+                              <span>{pkg.language}</span>
+                            </div>
+                          )}
+                          {Array.isArray(pkg.tags) && pkg.tags.length > 0 && (
+                            <div className="flex items-center space-x-2">
+                              <Tag className="w-4 h-4" />
+                              <div className="flex items-center flex-wrap gap-1">
+                                {pkg.tags.slice(0, MAX_VISIBLE_TAGS).map((tag) => (
+                                  <span
+                                    key={tag}
+                                    className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-xs"
+                                  >
+                                    {tag}
+                                  </span>
+                                ))}
+                                {pkg.tags.length > MAX_VISIBLE_TAGS && (
+                                  <span className="text-xs text-gray-400">
+                                    +{pkg.tags.length - MAX_VISIBLE_TAGS}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
-                      
+
                       <ArrowRight className="w-5 h-5 text-gray-400 group-hover:text-gray-600 group-hover:translate-x-1 transition-all duration-200" />
                     </div>
                   </div>
@@ -313,14 +371,16 @@ export const Dashboard = () => {
             ) : (
               <div className="text-center py-12">
                 <Package className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                <h3 className="text-lg font-medium text-gray-900 mb-2">No plugins found</h3>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">
+                  {packages.length === 0 ? "No plugins yet" : "No plugins found"}
+                </h3>
                 <p className="text-gray-600 mb-6">
-                  {searchTerm || filterActive !== 'all' 
-                    ? "Try adjusting your search or filter criteria"
-                    : "Get started by creating your first plugin"
+                  {packages.length === 0
+                    ? "Get started by creating your first plugin"
+                    : "Try adjusting your search or filter criteria"
                   }
                 </p>
-                {(!searchTerm && filterActive === 'all') && (
+                {packages.length === 0 && (
                   <button
                     onClick={() => setOpenModal(true)}
                     className="px-6 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium"
@@ -338,11 +398,11 @@ export const Dashboard = () => {
       {openModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
           {/* Backdrop */}
-          <div 
+          <div
             className="absolute inset-0 bg-black bg-opacity-50 backdrop-blur-sm"
             onClick={() => setOpenModal(false)}
           ></div>
-          
+
           {/* Modal Content */}
           <div className="relative bg-white rounded-3xl shadow-xl max-w-md w-full p-8">
             {/* Header */}
@@ -386,14 +446,33 @@ export const Dashboard = () => {
                 />
               </div>
 
+              <div>
+                <label htmlFor="version" className="block text-sm font-medium text-gray-700 mb-2">
+                  Version <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  id="version"
+                  type="text"
+                  autoComplete="off"
+                  value={version}
+                  onChange={(e) => setVersion(e.target.value)}
+                  className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-black focus:border-transparent outline-none transition-all duration-200"
+                  placeholder="1.0.0"
+                />
+              </div>
+
+              {createError && (
+                <p className="text-sm text-red-600">{createError}</p>
+              )}
+
               {/* Actions */}
               <div className="flex space-x-3 pt-4">
                 <button
                   onClick={handleSubmit}
-                  disabled={!packageName.trim() || !description.trim() || loading}
+                  disabled={!packageName.trim() || !description.trim() || creating}
                   className="flex-1 px-6 py-3 bg-black text-white rounded-xl hover:bg-gray-800 focus:ring-2 focus:ring-black focus:ring-offset-2 transition-all duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
                 >
-                  {loading ? (
+                  {creating ? (
                     <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
                   ) : (
                     "Create Plugin"

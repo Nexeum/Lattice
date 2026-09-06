@@ -5,19 +5,15 @@ import {
   Activity, 
   Shield, 
   Zap,
-  ArrowRight,
-  BarChart3
+  ArrowRight
 } from "lucide-react";
 
 import { useHistory } from "react-router-dom";
+import { PublicNavbar } from "./PublicNavbar";
 
 
 export const Home = () => {
-    const [stats, setStats] = useState({
-        containers: 12,
-        activeJobs: 3,
-        uptime: "99.8%"
-    });
+    const [stats, setStats] = useState(null);
 
     const history = useHistory();
 
@@ -29,16 +25,24 @@ export const Home = () => {
 
     useEffect(() => {
         setIsVisible(true);
-        
-        const interval = setInterval(() => {
-            setStats(prev => ({
-                ...prev,
-                containers: prev.containers + Math.floor(Math.random() * 3) - 1,
-                activeJobs: Math.max(0, prev.activeJobs + Math.floor(Math.random() * 3) - 1)
-            }));
-        }, 4000);
 
-        return () => clearInterval(interval);
+        const fetchStats = async () => {
+            try {
+                const response = await fetch("http://localhost:5001/containers");
+                if (!response.ok) {
+                    return;
+                }
+                const containers = await response.json();
+                setStats({
+                    containers: containers.length,
+                    running: containers.filter((c) => c.Status === "running").length,
+                });
+            } catch (error) {
+                setStats(null);
+            }
+        };
+
+        fetchStats();
     }, []);
 
     const features = [
@@ -71,28 +75,7 @@ export const Home = () => {
     return (
         <div className="min-h-screen bg-white">
             {/* Navigation */}
-            <nav className="fixed top-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-xl border-b border-gray-100">
-                <div className="max-w-6xl mx-auto px-6 py-4">
-                    <div className="flex justify-between items-center">
-                        <div className="flex items-center space-x-3">
-                            <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
-                                <Container className="w-4 h-4 text-white" />
-                            </div>
-                            <span className="text-xl font-medium text-gray-900">Lattice</span>
-                        </div>
-                        
-                        <div className="hidden md:flex items-center space-x-8">
-                            <a href="#features" className="text-gray-600 hover:text-gray-900 transition-colors text-sm font-medium">Features</a>
-                            <a href="#pricing" className="text-gray-600 hover:text-gray-900 transition-colors text-sm font-medium">Pricing</a>
-                            <a href="#docs" className="text-gray-600 hover:text-gray-900 transition-colors text-sm font-medium">Docs</a>
-                        </div>
-                        
-                        <button className="px-5 py-2 bg-black text-white rounded-full text-sm font-medium hover:bg-gray-800 transition-colors" onClick={navigateToAuth}>
-                            Sign In
-                        </button>
-                    </div>
-                </div>
-            </nav>
+            <PublicNavbar />
 
             {/* Hero Section */}
             <section className="pt-32 pb-20 px-6">
@@ -115,13 +98,16 @@ export const Home = () => {
                         </p>
                         
                         <div className="flex flex-col sm:flex-row gap-4 justify-center mb-16">
-                            <button className="group px-8 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium">
+                            <button className="group px-8 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium" onClick={navigateToAuth}>
                                 Get Started
                                 <ArrowRight className="inline ml-2 w-4 h-4 group-hover:translate-x-1 transition-transform" />
                             </button>
-                            <button className="px-8 py-3 text-gray-700 hover:text-gray-900 transition-colors duration-200 font-medium border border-gray-200 rounded-full hover:border-gray-300">
-                                Watch Demo
-                            </button>
+                            <a
+                                href="#features"
+                                className="px-8 py-3 text-gray-700 hover:text-gray-900 transition-colors duration-200 font-medium border border-gray-200 rounded-full hover:border-gray-300"
+                            >
+                                Explore Features
+                            </a>
                         </div>
                     </div>
 
@@ -140,7 +126,7 @@ export const Home = () => {
                                         <div className="text-gray-400 mt-2">✓ Containers deployed successfully</div>
                                         <div className="text-gray-400">✓ Auto-scaling enabled</div>
                                         <div className="text-gray-400">✓ Security policies applied</div>
-                                        <div className="text-blue-400 mt-2">→ Dashboard: https://app.Lattice.io</div>
+                                        <div className="text-blue-400 mt-2">→ Dashboard: http://localhost:3000</div>
                                     </div>
                                 </div>
                             </div>
@@ -152,8 +138,8 @@ export const Home = () => {
                                         <Activity className="w-4 h-4 text-green-600" />
                                     </div>
                                     <div>
-                                        <div className="text-sm font-medium">CPU Usage</div>
-                                        <div className="text-xs text-gray-500">32%</div>
+                                        <div className="text-sm font-medium">Containers</div>
+                                        <div className="text-xs text-gray-500">{stats ? `${stats.containers} total` : "—"}</div>
                                     </div>
                                 </div>
                             </div>
@@ -165,7 +151,7 @@ export const Home = () => {
                                     </div>
                                     <div>
                                         <div className="text-sm font-medium">Active</div>
-                                        <div className="text-xs text-gray-500">{stats.containers} containers</div>
+                                        <div className="text-xs text-gray-500">{stats ? `${stats.running} containers` : "—"}</div>
                                     </div>
                                 </div>
                             </div>
@@ -175,38 +161,31 @@ export const Home = () => {
             </section>
 
             {/* Stats Section */}
-            <section className="py-20 bg-gray-50">
-                <div className="max-w-6xl mx-auto px-6">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
-                        <div className="text-center">
-                            <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-50 rounded-2xl mb-6">
-                                <Container className="w-7 h-7 text-blue-600" />
+            {stats && (
+                <section className="py-20 bg-gray-50">
+                    <div className="max-w-6xl mx-auto px-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
+                            <div className="text-center">
+                                <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-50 rounded-2xl mb-6">
+                                    <Container className="w-7 h-7 text-blue-600" />
+                                </div>
+                                <div className="text-5xl font-light text-gray-900 mb-2">{stats.containers}</div>
+                                <div className="text-gray-600 font-medium">Containers</div>
+                                <div className="text-sm text-gray-500 mt-1">On this host</div>
                             </div>
-                            <div className="text-5xl font-light text-gray-900 mb-2">{stats.containers}</div>
-                            <div className="text-gray-600 font-medium">Active Containers</div>
-                            <div className="text-sm text-gray-500 mt-1">Across all environments</div>
-                        </div>
-                        
-                        <div className="text-center">
-                            <div className="inline-flex items-center justify-center w-16 h-16 bg-green-50 rounded-2xl mb-6">
-                                <Play className="w-7 h-7 text-green-600" />
+
+                            <div className="text-center">
+                                <div className="inline-flex items-center justify-center w-16 h-16 bg-green-50 rounded-2xl mb-6">
+                                    <Play className="w-7 h-7 text-green-600" />
+                                </div>
+                                <div className="text-5xl font-light text-gray-900 mb-2">{stats.running}</div>
+                                <div className="text-gray-600 font-medium">Running Now</div>
+                                <div className="text-sm text-gray-500 mt-1">Live from Docker</div>
                             </div>
-                            <div className="text-5xl font-light text-gray-900 mb-2">{stats.activeJobs}</div>
-                            <div className="text-gray-600 font-medium">Running Jobs</div>
-                            <div className="text-sm text-gray-500 mt-1">Processing workloads</div>
-                        </div>
-                        
-                        <div className="text-center">
-                            <div className="inline-flex items-center justify-center w-16 h-16 bg-purple-50 rounded-2xl mb-6">
-                                <BarChart3 className="w-7 h-7 text-purple-600" />
-                            </div>
-                            <div className="text-5xl font-light text-gray-900 mb-2">{stats.uptime}</div>
-                            <div className="text-gray-600 font-medium">System Uptime</div>
-                            <div className="text-sm text-gray-500 mt-1">This month</div>
                         </div>
                     </div>
-                </div>
-            </section>
+                </section>
+            )}
 
             {/* Features Section */}
             <section id="features" className="py-32 px-6">
@@ -261,11 +240,8 @@ export const Home = () => {
                     </p>
                     
                     <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                        <button className="px-8 py-3 bg-white text-black rounded-full hover:bg-gray-100 transition-all duration-200 font-medium">
-                            Start Free Trial
-                        </button>
-                        <button className="px-8 py-3 border border-gray-600 text-white rounded-full hover:border-gray-500 hover:bg-gray-900 transition-all duration-200 font-medium">
-                            Contact Sales
+                        <button className="px-8 py-3 bg-white text-black rounded-full hover:bg-gray-100 transition-all duration-200 font-medium" onClick={navigateToAuth}>
+                            Get Started
                         </button>
                     </div>
                 </div>
