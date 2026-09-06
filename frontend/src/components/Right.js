@@ -8,6 +8,7 @@ import {
   Tag,
   Code,
 } from "lucide-react";
+import { authHeaders, redirectIfUnauthorized } from "../lib/api";
 
 const USER_API_URL = "http://localhost:5005/userData";
 const HEALTH_API_URL = "http://localhost:5001/system/health";
@@ -40,9 +41,7 @@ export const Right = () => {
     const fetchUserData = async () => {
       try {
         const response = await axios.get(USER_API_URL, {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("token")}`,
-          },
+          headers: { ...authHeaders() },
         });
         // Backend returns a JSON-encoded string (json_util.dumps)
         const parsed =
@@ -54,6 +53,7 @@ export const Right = () => {
         }
       } catch (error) {
         console.error("Failed to fetch user data:", error);
+        if (redirectIfUnauthorized(error.response)) return;
       } finally {
         if (isMounted) {
           setUserLoading(false);
@@ -74,12 +74,15 @@ export const Right = () => {
 
     const fetchSystemHealth = async () => {
       try {
-        const response = await axios.get(HEALTH_API_URL);
+        const response = await axios.get(HEALTH_API_URL, {
+          headers: { ...authHeaders() },
+        });
         if (isMounted) {
           setSystemHealth(response.data);
         }
       } catch (error) {
         console.error("Failed to fetch system health:", error);
+        if (redirectIfUnauthorized(error.response)) return;
         if (isMounted) {
           setSystemHealth(null);
         }
@@ -101,12 +104,15 @@ export const Right = () => {
 
     const fetchPackageData = async () => {
       try {
-        const response = await axios.get(`${PACKAGES_API_URL}/${id}`);
+        const response = await axios.get(`${PACKAGES_API_URL}/${id}`, {
+          headers: { ...authHeaders() },
+        });
         if (isMounted) {
           setPackageData(response.data);
         }
       } catch (error) {
         console.error("Failed to fetch package data:", error);
+        if (redirectIfUnauthorized(error.response)) return;
         if (isMounted) {
           setPackageData(null);
         }

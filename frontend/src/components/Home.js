@@ -10,6 +10,7 @@ import {
 
 import { useHistory } from "react-router-dom";
 import { PublicNavbar } from "./PublicNavbar";
+import { authHeaders } from "../lib/api";
 
 
 export const Home = () => {
@@ -28,7 +29,12 @@ export const Home = () => {
 
         const fetchStats = async () => {
             try {
-                const response = await fetch("http://localhost:5001/containers");
+                // Public page: send the token when we have one so logged-in
+                // visitors see live numbers; anonymous visitors get a 401 and
+                // the stats simply stay hidden (no redirect here).
+                const response = await fetch("http://localhost:5001/containers", {
+                    headers: { ...authHeaders() }
+                });
                 if (!response.ok) {
                     return;
                 }

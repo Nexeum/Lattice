@@ -1,0 +1,78 @@
+name: lattice
+
+# Shared settings for the four Python services (one image, different commands).
+x-backend: &backend
+  build: ./backend
+  image: lattice-backend
+  restart: unless-stopped
+  depends_on:
+    mongo:
+      condition: service_healthy
+  environment: &backend-env
+    LATTICE_SECRET_KEY: ${LATTICE_SECRET_KEY:-lattice_secret}
+    LATTICE_MONGO_URL: mongodb://mongo:27017/
+    LATTICE_CORS_ORIGINS: ${LATTICE_CORS_ORIGINS:-http://localhost:3000}
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  auth:
+    <<: *backend
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5005"]
+    ports:
+      - "5005:5005"
+
+  containers:
+    <<: *backend
+    command: ["uvicorn", "container:app", "--host", "0.0.0.0", "--port", "5001"]
+    ports:
+      - "5001:5001"
+    environment:
+      <<: *backend-env
+      # Plugin installs / CI fetch package files from the packages service
+      LATTICE_PACKAGES_URL: http://packages:5003
+    volumes:
+      # This service drives the HOST Docker daemon (docker-py + docker CLI),
+      # so the host socket must be mounted inside the container.
+      # Docker Desktop / Linux: the default /var/run/docker.sock works as-is.
+      # colima users: set DOCKER_SOCK=~/.colima/default/docker.sock in .env
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+
+  rooms:
+    <<: *backend
+    command: ["uvicorn", "room:app", "--host", "0.0.0.0", "--port", "5002"]
+    ports:
+      - "5002:5002"
+
+  packages:
+    <<: *backend
+    command: ["uvicorn", "package:app", "--host", "0.0.0.0", "--port", "5003"]
+    ports:
+      - "5003:5003"
+    environment:
+      <<: *backend-env
+      # The packages service triggers CI runs on the containers service
+      LATTICE_CONTAINERS_URL: http://containers:5001
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - auth
+
+volumes:
+  mongo_data:

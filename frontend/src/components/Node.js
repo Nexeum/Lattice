@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Cli } from './Cli';
 import { Graph } from './Graph';
+import { authHeaders, redirectIfUnauthorized } from '../lib/api';
 
 const API_BASE = 'http://localhost:5001';
 
@@ -87,8 +88,10 @@ export const Node = () => {
     setMetricsError(null);
     try {
       const response = await fetch(
-        `${API_BASE}/container/${encodeURIComponent(nodeId)}/metrics`
+        `${API_BASE}/container/${encodeURIComponent(nodeId)}/metrics`,
+        { headers: { ...authHeaders() } }
       );
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Metrics request failed with status ${response.status}`);
       }
@@ -111,8 +114,10 @@ export const Node = () => {
     setPsError(null);
     try {
       const response = await fetch(
-        `${API_BASE}/containers/${encodeURIComponent(nodeId)}/ps`
+        `${API_BASE}/containers/${encodeURIComponent(nodeId)}/ps`,
+        { headers: { ...authHeaders() } }
       );
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`ps request failed with status ${response.status}`);
       }

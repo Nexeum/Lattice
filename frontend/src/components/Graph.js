@@ -9,6 +9,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Server, Box, Network, RefreshCw, X } from 'lucide-react';
+import { authHeaders, redirectIfUnauthorized } from '../lib/api';
 
 const TOPOLOGY_URL = 'http://localhost:5001/topology';
 
@@ -574,7 +575,10 @@ export const Graph = ({ roomNodes = null }) => {
         setError(null);
         setSelected(null);
         try {
-            const response = await fetch(TOPOLOGY_URL);
+            const response = await fetch(TOPOLOGY_URL, {
+                headers: { ...authHeaders() }
+            });
+            if (redirectIfUnauthorized(response)) return;
             if (!response.ok) {
                 throw new Error(`Request failed with status ${response.status}`);
             }

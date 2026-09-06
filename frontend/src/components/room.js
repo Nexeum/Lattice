@@ -26,6 +26,7 @@ import {
   ChevronDown,
   ChevronRight
 } from 'lucide-react';
+import { authHeaders, redirectIfUnauthorized } from '../lib/api';
 
 const ROOMS_API = 'http://localhost:5002';
 const CONTAINERS_API = 'http://localhost:5001';
@@ -154,7 +155,10 @@ export const Room = () => {
     setRoomLoading(true);
     setRoomError(null);
     try {
-      const response = await fetch(`${ROOMS_API}/rooms/${id}`);
+      const response = await fetch(`${ROOMS_API}/rooms/${id}`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Rooms service responded with ${response.status}`);
       }
@@ -174,7 +178,10 @@ export const Room = () => {
     setContainersLoading(true);
     setContainersError(null);
     try {
-      const response = await fetch(`${CONTAINERS_API}/containers`);
+      const response = await fetch(`${CONTAINERS_API}/containers`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return null;
       if (!response.ok) {
         throw new Error(`Containers service responded with ${response.status}`);
       }
@@ -209,8 +216,9 @@ export const Room = () => {
     try {
       const response = await fetch(
         `${CONTAINERS_API}/containermain/${encodeURIComponent(parentName)}`,
-        { method: 'POST' }
+        { method: 'POST', headers: { ...authHeaders() } }
       );
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Provisioning responded with ${response.status}`);
       }
@@ -251,8 +259,10 @@ export const Room = () => {
     setStartError(null);
     try {
       const response = await fetch(`${CONTAINERS_API}/container/${parentId}/start`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { ...authHeaders() }
       });
+      if (redirectIfUnauthorized(response)) return;
       let body = null;
       try {
         body = await response.json();
@@ -275,7 +285,10 @@ export const Room = () => {
     setChildrenLoading(true);
     setChildrenError(null);
     try {
-      const response = await fetch(`${CONTAINERS_API}/containers/${nodeId}/ps`);
+      const response = await fetch(`${CONTAINERS_API}/containers/${nodeId}/ps`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return [];
       if (!response.ok) {
         throw new Error(`ps request responded with ${response.status}`);
       }
@@ -320,8 +333,9 @@ export const Room = () => {
       const command = `docker exec ${childId} docker ps --format "{{.ID}},{{.Names}},{{.Image}},{{.Status}}"`;
       const response = await fetch(
         `${CONTAINERS_API}/exe/${nodeId}/${encodeURIComponent(command)}`,
-        { method: 'POST' }
+        { method: 'POST', headers: { ...authHeaders() } }
       );
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`exe request responded with ${response.status}`);
       }
@@ -375,8 +389,9 @@ export const Room = () => {
         const command = `docker stats ${child.ID} --no-stream --format "{{json .}}"`;
         const response = await fetch(
           `${CONTAINERS_API}/exe/${nodeId}/${encodeURIComponent(command)}`,
-          { method: 'POST' }
+          { method: 'POST', headers: { ...authHeaders() } }
         );
+        if (redirectIfUnauthorized(response)) return;
         if (!response.ok) {
           throw new Error(`exe request responded with ${response.status}`);
         }
@@ -395,7 +410,10 @@ export const Room = () => {
           data = {};
         }
       } else {
-        const response = await fetch(`${CONTAINERS_API}/container/${nodeId}/metrics`);
+        const response = await fetch(`${CONTAINERS_API}/container/${nodeId}/metrics`, {
+          headers: { ...authHeaders() }
+        });
+        if (redirectIfUnauthorized(response)) return;
         if (!response.ok) {
           throw new Error(`metrics request responded with ${response.status}`);
         }
@@ -447,8 +465,10 @@ export const Room = () => {
       const response = await fetch(
         `${CONTAINERS_API}/container/${encodeURIComponent(parentId)}/${encodeURIComponent(
           cleanedName
-        )}/${encodeURIComponent(image)}/${encodeURIComponent(shell)}`
+        )}/${encodeURIComponent(image)}/${encodeURIComponent(shell)}`,
+        { headers: { ...authHeaders() } }
       );
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Node creation responded with ${response.status}`);
       }
@@ -481,7 +501,10 @@ export const Room = () => {
     setPackagesLoading(true);
     setPackagesError(null);
     try {
-      const response = await fetch(`${PACKAGES_API}/packages`);
+      const response = await fetch(`${PACKAGES_API}/packages`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Packages service responded with ${response.status}`);
       }
@@ -515,7 +538,11 @@ export const Room = () => {
       : `${CONTAINERS_API}/container/${parentId}/install/${selectedPackageId}`;
 
     try {
-      const response = await fetch(url, { method: 'POST' });
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
       let body = null;
       try {
         body = await response.json();

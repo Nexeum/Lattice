@@ -134,9 +134,12 @@ curl -X POST ${AUTH_BASE_URL}/login \\
   -H "Content-Type: application/json" \\
   -d '{"email": "dev@example.com", "password": "secret"}'
 # => {"token": "eyJhbGciOi..."}
+export TOKEN="eyJhbGciOi..."
 
 # 3. List your local Docker containers (containers service, port 5001)
-curl ${CONTAINERS_BASE_URL}/containers`;
+#    Every service except /register and /login now requires the token.
+curl ${CONTAINERS_BASE_URL}/containers \\
+  -H "Authorization: Bearer $TOKEN"`;
 
   const cliSetupCode = `# The CLI is a plain bash script that lives in the repo at bin/lattice.
 # It needs curl and python3 (both ship with macOS). From the repo root:
@@ -148,6 +151,7 @@ alias lattice="/path/to/Lattice/bin/lattice"
 lattice help`;
 
   const cliWorkflowCode = `# 1. Log in once — the token is cached in ~/.lattice/config (chmod 600)
+#    Required: every other command talks to services that now check the JWT.
 lattice login dev@example.com
 
 # 2. Create a package for your plugin (prints the new package id)
@@ -186,26 +190,37 @@ lattice exec <container_id> ls -la /opt/lattice/plugins`;
 curl -X POST ${AUTH_BASE_URL}/login \\
   -H "Content-Type: application/json" \\
   -d '{"email": "dev@example.com", "password": "secret"}'
+export TOKEN="eyJhbGciOi..."
 
 # Use the token to fetch your user data
 curl ${AUTH_BASE_URL}/userData \\
-  -H "Authorization: Bearer <token>"`;
+  -H "Authorization: Bearer $TOKEN"
+
+# The same header is required by the other services:
+curl ${CONTAINERS_BASE_URL}/containers \\
+  -H "Authorization: Bearer $TOKEN"
+curl ${ROOMS_BASE_URL}/rooms \\
+  -H "Authorization: Bearer $TOKEN"
+curl ${PACKAGES_BASE_URL}/packages \\
+  -H "Authorization: Bearer $TOKEN"`;
 
   const execExample = `# Run "ls -la" inside container 1a2b3c4d5e6f.
 # The command lives in the URL path, so it must be URL-encoded:
 # spaces -> %20, slashes -> %2F, etc.
-curl -X POST "${CONTAINERS_BASE_URL}/exe/1a2b3c4d5e6f/ls%20-la"
+curl -X POST "${CONTAINERS_BASE_URL}/exe/1a2b3c4d5e6f/ls%20-la" \\
+  -H "Authorization: Bearer $TOKEN"
 # => {"output": "total 64\\ndrwxr-xr-x ..."}
 
 # Same idea for a nested (Docker-in-Docker) container:
-curl -X POST "${CONTAINERS_BASE_URL}/node/<outerId>/<innerId>/cat%20%2Fetc%2Fhostname"`;
+curl -X POST "${CONTAINERS_BASE_URL}/node/<outerId>/<innerId>/cat%20%2Fetc%2Fhostname" \\
+  -H "Authorization: Bearer $TOKEN"`;
 
   const jsExample = `// Plain fetch against the local services — no SDK needed.
 const AUTH_URL = '${AUTH_BASE_URL}';
 const CONTAINERS_URL = '${CONTAINERS_BASE_URL}';
 
 async function listContainersWithMetrics(email, password) {
-  // 1. Log in (only the auth service requires a token)
+  // 1. Log in — every service (except /register and /login) requires the JWT
   const loginRes = await fetch(\`\${AUTH_URL}/login\`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -213,18 +228,22 @@ async function listContainersWithMetrics(email, password) {
   });
   if (!loginRes.ok) throw new Error(\`Login failed: \${loginRes.status}\`);
   const { token } = await loginRes.json();
+  const auth = { Authorization: \`Bearer \${token}\` };
 
   // 2. Fetch user data with the Bearer token
-  const userRes = await fetch(\`\${AUTH_URL}/userData\`, {
-    headers: { Authorization: \`Bearer \${token}\` }
-  });
+  const userRes = await fetch(\`\${AUTH_URL}/userData\`, { headers: auth });
   const user = await userRes.json();
 
   // 3. List containers and pull live metrics for the first one
-  const containers = await (await fetch(\`\${CONTAINERS_URL}/containers\`)).json();
+  //    (same Bearer token, now enforced by the containers service too)
+  const containers = await (
+    await fetch(\`\${CONTAINERS_URL}/containers\`, { headers: auth })
+  ).json();
   if (containers.length > 0) {
     const metrics = await (
-      await fetch(\`\${CONTAINERS_URL}/container/\${containers[0].ID}/metrics\`)
+      await fetch(\`\${CONTAINERS_URL}/container/\${containers[0].ID}/metrics\`, {
+        headers: auth
+      })
     ).json();
     return { user, containers, metrics };
   }
@@ -397,7 +416,9 @@ async function listContainersWithMetrics(email, password) {
                   <code className="bg-gray-100 px-2 py-0.5 rounded text-sm">bin/lattice</code>{' '}
                   that wraps the same REST endpoints documented on this page: log in once,
                   create a package, push every file in your plugin directory, and install it
-                  into any container — all from the terminal.
+                  into any container — all from the terminal. Note that{' '}
+                  <code className="bg-gray-100 px-2 py-0.5 rounded text-sm">lattice login</code>{' '}
+                  is now required before any other command, since every service checks the token.
                 </p>
 
                 <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
@@ -460,18 +481,19 @@ async function listContainersWithMetrics(email, password) {
                 <p className="text-gray-600 mb-6">
                   The auth service issues a JWT on login, valid for 12 hours. Send it as{' '}
                   <code className="bg-gray-100 px-2 py-0.5 rounded text-sm">Authorization: Bearer &lt;token&gt;</code>{' '}
-                  when calling <code className="bg-gray-100 px-2 py-0.5 rounded text-sm">/userData</code>.
+                  on every request to every service.
                 </p>
 
                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
                   <div className="flex items-start space-x-3">
                     <Shield className="w-5 h-5 text-amber-600 mt-0.5" />
                     <div>
-                      <p className="text-sm font-medium text-amber-900">Heads up: only the auth service checks tokens</p>
+                      <p className="text-sm font-medium text-amber-900">All services now require the Bearer token</p>
                       <p className="text-sm text-amber-800">
-                        The containers (5001), rooms (5002), and packages (5003) services currently
-                        accept requests without authentication. They are intended to be reached
-                        only from your own machine — do not expose them beyond localhost.
+                        The containers (5001), rooms (5002), and packages (5003) services enforce
+                        JWT authentication on every endpoint, just like the auth service. The only
+                        exceptions are <code>/register</code> and <code>/login</code>. Requests
+                        without a valid token get a <code>401</code>.
                       </p>
                     </div>
                   </div>

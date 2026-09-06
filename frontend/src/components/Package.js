@@ -22,8 +22,10 @@ import {
   Slash,
   ChevronDown,
   ChevronRight,
-  AlertCircle
+  AlertCircle,
+  History
 } from "lucide-react";
+import { authHeaders, getToken, redirectIfUnauthorized } from "../lib/api";
 
 const API_BASE = "http://localhost:5003";
 const CI_BASE = "http://localhost:5001";
@@ -151,12 +153,37 @@ const renderMarkdown = (source) => {
 };
 
 /* ------------------------------------------------------------------ */
-/* File viewer: header bar + line-numbered mono content + copy button. */
+/* File viewer: header bar + line-numbered mono content + copy button, */
+/* plus GitHub-style version history with view & rollback.             */
 /* ------------------------------------------------------------------ */
 
-const FileViewer = ({ file, onClose }) => {
+const formatVersionSize = (length) => {
+  if (typeof length !== "number" || Number.isNaN(length)) return null;
+  if (length < 1024) return `${length} B`;
+  return `${(length / 1024).toFixed(1)} KB`;
+};
+
+const formatVersionDate = (iso) => {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString();
+};
+
+const FileViewer = ({ file, packageId, onPackageUpdate, onClose }) => {
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef(null);
+
+  const [showHistory, setShowHistory] = useState(false);
+  const [versions, setVersions] = useState(null);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionsError, setVersionsError] = useState(null);
+  const [viewingVersion, setViewingVersion] = useState(null);
+  const [versionViewError, setVersionViewError] = useState(null);
+  const [loadingVersionId, setLoadingVersionId] = useState(null);
+  const [restoringId, setRestoringId] = useState(null);
+  const [restoreError, setRestoreError] = useState(null);
+  const [restoredNote, setRestoredNote] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -166,9 +193,120 @@ const FileViewer = ({ file, onClose }) => {
     };
   }, []);
 
+  const fileUrl = `${API_BASE}/packages/${packageId}/files/${encodeURIComponent(file.name)}`;
+
+  const fetchVersions = useCallback(async () => {
+    setVersionsLoading(true);
+    setVersionsError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE}/packages/${packageId}/files/${encodeURIComponent(file.name)}/versions`,
+        { headers: { ...authHeaders() } }
+      );
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        throw new Error(`Versions request failed (${response.status})`);
+      }
+      const data = await response.json();
+      setVersions(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Error fetching file versions:", error);
+      setVersionsError("Could not load version history. Please try again.");
+    } finally {
+      setVersionsLoading(false);
+    }
+  }, [packageId, file.name]);
+
+  const handleToggleHistory = () => {
+    const opening = !showHistory;
+    setShowHistory(opening);
+    setViewingVersion(null);
+    setVersionViewError(null);
+    setRestoreError(null);
+    if (opening) {
+      fetchVersions();
+    }
+  };
+
+  const handleViewVersion = async (entry, total) => {
+    setLoadingVersionId(entry.id);
+    setVersionViewError(null);
+    try {
+      const response = await fetch(`${fileUrl}/versions/${entry.id}`, {
+        headers: { ...authHeaders() }
+      });
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        throw new Error(`Version request failed (${response.status})`);
+      }
+      const data = await response.json();
+      setViewingVersion({
+        number: entry.number,
+        total,
+        content: data.content,
+        uploadDate: data.uploadDate
+      });
+      setShowHistory(false);
+      setRestoredNote(false);
+    } catch (error) {
+      console.error("Error fetching file version:", error);
+      setVersionViewError("Could not load that version. Please try again.");
+    } finally {
+      setLoadingVersionId(null);
+    }
+  };
+
+  const handleRestore = async (entry) => {
+    const confirmed = window.confirm(
+      `Restore "${file.name}" to version ${entry.number}? This creates a new version with that content.`
+    );
+    if (!confirmed) return;
+
+    setRestoringId(entry.id);
+    setRestoreError(null);
+    setRestoredNote(false);
+    try {
+      const response = await fetch(`${fileUrl}/rollback/${entry.id}`, {
+        method: "POST",
+        headers: { ...authHeaders() }
+      });
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        let message = `Could not restore this version (${response.status}).`;
+        try {
+          const body = await response.json();
+          const serverMessage = body && (body.error || body.message || body.detail);
+          if (serverMessage) {
+            message = serverMessage;
+          }
+        } catch (parseError) {
+          // Body was not JSON; keep the default message.
+        }
+        throw new Error(message);
+      }
+      const updatedPackage = await response.json();
+      onPackageUpdate(updatedPackage);
+      setViewingVersion(null);
+      setRestoredNote(true);
+      fetchVersions();
+    } catch (error) {
+      console.error("Error restoring file version:", error);
+      setRestoreError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Could not restore this version. Please try again."
+      );
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  const displayedContent = viewingVersion ? viewingVersion.content : file.content;
+  const contentLines = displayedContent != null ? String(displayedContent).split("\n") : null;
+
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(file.content || "");
+      await navigator.clipboard.writeText(displayedContent || "");
       setCopied(true);
       copyTimeoutRef.current = setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
     } catch (error) {
@@ -176,7 +314,13 @@ const FileViewer = ({ file, onClose }) => {
     }
   };
 
-  const contentLines = file.content != null ? String(file.content).split("\n") : null;
+  const totalVersions = Array.isArray(versions) ? versions.length : 0;
+  // API returns versions oldest first; number them 1..N and show newest first.
+  const orderedVersions = Array.isArray(versions)
+    ? versions.map((entry, index) => ({ ...entry, number: index + 1 })).reverse()
+    : [];
+
+  const viewingDate = viewingVersion ? formatVersionDate(viewingVersion.uploadDate) : null;
 
   return (
     <div className="border border-gray-200 rounded-2xl overflow-hidden bg-white">
@@ -195,7 +339,19 @@ const FileViewer = ({ file, onClose }) => {
           </span>
         </div>
         <div className="flex items-center gap-1">
-          {contentLines != null && (
+          <button
+            onClick={handleToggleHistory}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg transition-colors ${
+              showHistory
+                ? "text-gray-900 bg-gray-200 hover:bg-gray-200"
+                : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+            }`}
+            title="Version history"
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>History</span>
+          </button>
+          {contentLines != null && !showHistory && (
             <button
               onClick={handleCopy}
               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
@@ -224,7 +380,113 @@ const FileViewer = ({ file, onClose }) => {
         </div>
       </div>
 
-      {contentLines != null ? (
+      {restoredNote && (
+        <div className="flex items-center gap-2 px-4 py-2 text-sm text-green-700 bg-green-50 border-b border-green-100">
+          <Check className="w-4 h-4 shrink-0" />
+          <span>Restored as new version.</span>
+        </div>
+      )}
+
+      {(restoreError || versionViewError) && (
+        <div className="flex items-start gap-2 px-4 py-2 text-sm text-red-700 bg-red-50 border-b border-red-100">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{restoreError || versionViewError}</span>
+        </div>
+      )}
+
+      {viewingVersion && !showHistory && (
+        <div className="flex items-center justify-between gap-3 px-4 py-2 text-sm text-amber-800 bg-amber-50 border-b border-amber-100">
+          <span className="min-w-0 truncate">
+            Viewing version {viewingVersion.number} of {viewingVersion.total}
+            {viewingDate ? ` — ${viewingDate}` : ""}
+          </span>
+          <button
+            onClick={() => setViewingVersion(null)}
+            className="font-medium text-amber-900 hover:underline shrink-0"
+          >
+            Back to current
+          </button>
+        </div>
+      )}
+
+      {showHistory ? (
+        versionsLoading ? (
+          <div className="flex items-center justify-center py-14">
+            <div className="w-6 h-6 border-2 border-gray-200 border-t-black rounded-full animate-spin"></div>
+          </div>
+        ) : versionsError ? (
+          <div className="px-4 py-10 text-center">
+            <p className="text-sm text-red-600 mb-3">{versionsError}</p>
+            <button
+              onClick={fetchVersions}
+              className="text-sm font-medium text-gray-700 hover:text-gray-900 underline"
+            >
+              Retry
+            </button>
+          </div>
+        ) : orderedVersions.length > 0 ? (
+          <div className="divide-y divide-gray-100">
+            {orderedVersions.map((entry) => {
+              const isCurrent = entry.number === totalVersions;
+              const date = formatVersionDate(entry.uploadDate);
+              const size = formatVersionSize(entry.length);
+              return (
+                <div key={entry.id} className="flex items-center gap-3 px-4 py-2.5">
+                  <History className="w-4 h-4 text-gray-400 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-900">
+                        Version {entry.number}
+                      </span>
+                      {isCurrent && (
+                        <span className="inline-flex items-center px-2 py-0.5 bg-green-50 border border-green-200 text-green-700 rounded-full text-[11px] font-medium">
+                          current
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {[date, size].filter(Boolean).join(" · ") || "—"}
+                    </span>
+                  </div>
+                  {!isCurrent && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleViewVersion(entry, totalVersions)}
+                        disabled={loadingVersionId === entry.id || restoringId != null}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {loadingVersionId === entry.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <span>View</span>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => handleRestore(entry)}
+                        disabled={restoringId != null || loadingVersionId != null}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {restoringId === entry.id ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Restoring...</span>
+                          </>
+                        ) : (
+                          <span>Restore</span>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="px-4 py-10 text-center text-sm text-gray-500">
+            No version history for this file.
+          </div>
+        )
+      ) : contentLines != null ? (
         <div className="overflow-x-auto">
           <pre className="text-[13px] font-mono leading-6 text-gray-800 py-3">
             {contentLines.map((line, index) => (
@@ -339,6 +601,14 @@ const RunDetail = ({ run, onBack }) => {
             CI pipeline #{run.number}
           </span>
           <TriggerBadge trigger={run.trigger} />
+          {run.image && (
+            <span
+              className="text-[11px] font-mono text-gray-400 truncate hidden sm:inline"
+              title={`Runner image: ${run.image}`}
+            >
+              {run.image}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-500 shrink-0">
           {created && <span>Started {created}</span>}
@@ -404,11 +674,16 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
   const [runsError, setRunsError] = useState(null);
   const [selectedRunId, setSelectedRunId] = useState(null);
   const [triggering, setTriggering] = useState(false);
+  // Run ids whose SSE stream failed; those fall back to interval polling.
+  const [sseFallbackIds, setSseFallbackIds] = useState([]);
 
   const fetchRuns = useCallback(async () => {
     try {
-      const response = await fetch(`${CI_BASE}/ci/${packageId}/runs`);
+      const response = await fetch(`${CI_BASE}/ci/${packageId}/runs`, {
+        headers: { ...authHeaders() }
+      });
       if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
         throw new Error(`Runs request failed (${response.status})`);
       }
       const data = await response.json();
@@ -426,9 +701,56 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
     fetchRuns();
   }, [fetchRuns, refreshKey]);
 
-  // Poll every running run visible in the list (includes the opened one).
+  const selectedRun = selectedRunId
+    ? runs.find((run) => run._id === selectedRunId)
+    : null;
+
+  // The opened run streams live over SSE while it is running (unless its
+  // stream already failed, in which case it stays on the polling fallback).
+  const streamingRunId =
+    selectedRun &&
+    selectedRun.status === "running" &&
+    !sseFallbackIds.includes(selectedRun._id)
+      ? selectedRun._id
+      : null;
+
+  useEffect(() => {
+    if (!streamingRunId) return undefined;
+
+    const url = `${CI_BASE}/ci/runs/${streamingRunId}/stream?token=${encodeURIComponent(
+      getToken()
+    )}`;
+    const source = new EventSource(url);
+
+    source.onmessage = (event) => {
+      try {
+        const updated = JSON.parse(event.data);
+        if (!updated || updated._id !== streamingRunId) return;
+        setRuns((prev) =>
+          prev.map((run) => (run._id === updated._id ? updated : run))
+        );
+        if (updated.status !== "running") {
+          source.close();
+        }
+      } catch (error) {
+        console.error("Error parsing CI stream event:", error);
+      }
+    };
+
+    source.onerror = () => {
+      source.close();
+      setSseFallbackIds((prev) =>
+        prev.includes(streamingRunId) ? prev : [...prev, streamingRunId]
+      );
+    };
+
+    return () => source.close();
+  }, [streamingRunId]);
+
+  // Poll running runs not covered by the SSE stream (list entries that are
+  // not open, plus the opened run when its stream failed).
   const runningKey = runs
-    .filter((run) => run.status === "running")
+    .filter((run) => run.status === "running" && run._id !== streamingRunId)
     .map((run) => run._id)
     .join(",");
 
@@ -439,8 +761,13 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
       const updates = await Promise.all(
         ids.map(async (runId) => {
           try {
-            const response = await fetch(`${CI_BASE}/ci/runs/${runId}`);
-            if (!response.ok) return null;
+            const response = await fetch(`${CI_BASE}/ci/runs/${runId}`, {
+              headers: { ...authHeaders() }
+            });
+            if (!response.ok) {
+              if (redirectIfUnauthorized(response)) return null;
+              return null;
+            }
             return await response.json();
           } catch (error) {
             console.error("Error polling CI run:", error);
@@ -462,9 +789,11 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
     setRunsError(null);
     try {
       const response = await fetch(`${CI_BASE}/ci/${packageId}/run?trigger=manual`, {
-        method: "POST"
+        method: "POST",
+        headers: { ...authHeaders() }
       });
       if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
         throw new Error(`Run request failed (${response.status})`);
       }
       const run = await response.json();
@@ -477,10 +806,6 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
       setTriggering(false);
     }
   };
-
-  const selectedRun = selectedRunId
-    ? runs.find((run) => run._id === selectedRunId)
-    : null;
 
   if (selectedRun) {
     return <RunDetail run={selectedRun} onBack={() => setSelectedRunId(null)} />;
@@ -588,8 +913,11 @@ export const Package = () => {
 
   const fetchPackage = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE}/packages/${id}`);
+      const response = await fetch(`${API_BASE}/packages/${id}`, {
+        headers: { ...authHeaders() }
+      });
       if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
         setNotFound(true);
         return;
       }
@@ -632,10 +960,11 @@ export const Package = () => {
     try {
       const response = await fetch(`${API_BASE}/packages/${id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ stars: nextStars })
       });
       if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
         throw new Error(`Star failed (${response.status})`);
       }
     } catch (error) {
@@ -649,22 +978,17 @@ export const Package = () => {
     }
   };
 
-  // Fire-and-forget CI run on push (contribution). Errors are tolerated;
-  // the runs list is refreshed afterwards if the Actions tab is open.
-  const triggerPushRun = useCallback(async () => {
-    try {
-      const response = await fetch(`${CI_BASE}/ci/${id}/run?trigger=push`, {
-        method: "POST"
-      });
-      if (!response.ok) {
-        throw new Error(`CI push trigger failed (${response.status})`);
-      }
-    } catch (error) {
-      console.error("Error triggering CI push run:", error);
-    } finally {
-      setCiRefreshKey((prev) => prev + 1);
-    }
-  }, [id]);
+  // After a rollback the file service returns the updated package; keep the
+  // package state and the open file viewer in sync with it (immutably).
+  const handlePackageUpdate = useCallback((updatedPackage) => {
+    if (!updatedPackage) return;
+    setPackageData(updatedPackage);
+    setSelectedFile((prev) => {
+      if (!prev) return prev;
+      const updatedFiles = Array.isArray(updatedPackage.files) ? updatedPackage.files : [];
+      return updatedFiles.find((f) => f && f.name === prev.name) || prev;
+    });
+  }, []);
 
   const handleUpload = async (event) => {
     const file = event.target.files && event.target.files[0];
@@ -678,14 +1002,18 @@ export const Package = () => {
       formData.append("file", file);
       const response = await fetch(`${API_BASE}/packages/${id}/files`, {
         method: "POST",
+        headers: { ...authHeaders() },
         body: formData
       });
       if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
         throw new Error(`Upload failed (${response.status})`);
       }
       await fetchPackage();
       setUploadSuccess(`"${file.name}" contributed successfully.`);
-      triggerPushRun();
+      // The backend auto-triggers a CI run on upload (trigger=push); just
+      // refresh the runs list so the new run shows up.
+      setCiRefreshKey((prev) => prev + 1);
     } catch (error) {
       console.error("Error uploading file:", error);
       setUploadError("Could not upload the file. Please try again.");
@@ -705,9 +1033,11 @@ export const Package = () => {
     setDeleteError(null);
     try {
       const response = await fetch(`${API_BASE}/packages/${id}`, {
-        method: "DELETE"
+        method: "DELETE",
+        headers: { ...authHeaders() }
       });
       if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
         throw new Error(`Delete failed (${response.status})`);
       }
       history.push("/");
@@ -901,7 +1231,12 @@ export const Package = () => {
             {activeTab === "actions" ? (
               <ActionsPanel packageId={id} refreshKey={ciRefreshKey} />
             ) : selectedFile ? (
-              <FileViewer file={selectedFile} onClose={() => setSelectedFile(null)} />
+              <FileViewer
+                file={selectedFile}
+                packageId={id}
+                onPackageUpdate={handlePackageUpdate}
+                onClose={() => setSelectedFile(null)}
+              />
             ) : (
               <>
                 {/* File browser */}

@@ -15,6 +15,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { authHeaders, redirectIfUnauthorized } from '../lib/api';
 
 Chart.register(...registerables);
 
@@ -136,7 +137,7 @@ export const ContainerDetails = () => {
     let cancelled = false;
 
     axios
-      .get(`${API_BASE}/containers`)
+      .get(`${API_BASE}/containers`, { headers: { ...authHeaders() } })
       .then((response) => {
         if (cancelled || !Array.isArray(response.data)) return;
         const match = response.data.find(
@@ -150,6 +151,7 @@ export const ContainerDetails = () => {
       })
       .catch((error) => {
         console.error('Failed to load container info', error);
+        if (redirectIfUnauthorized(error.response)) return;
       });
 
     return () => {
@@ -162,7 +164,7 @@ export const ContainerDetails = () => {
 
     const fetchMetrics = () => {
       axios
-        .get(`${API_BASE}/container/${id}/metrics`)
+        .get(`${API_BASE}/container/${id}/metrics`, { headers: { ...authHeaders() } })
         .then((response) => {
           if (cancelled) return;
           const data = response.data || {};
@@ -180,6 +182,7 @@ export const ContainerDetails = () => {
         })
         .catch((error) => {
           console.error('Failed to load container metrics', error);
+          if (redirectIfUnauthorized(error.response)) return;
           if (cancelled) return;
           setMetricFailures((prev) => prev + 1);
           setInitialLoading(false);
@@ -201,7 +204,10 @@ export const ContainerDetails = () => {
     setLoadTestFailed(false);
 
     axios
-      .get(`${API_BASE}/container/${id}/overload`, { timeout: 120000 })
+      .get(`${API_BASE}/container/${id}/overload`, {
+        timeout: 120000,
+        headers: { ...authHeaders() },
+      })
       .then((response) => {
         const results = extractLoadTestResults(response.data);
         setLoadTestResults(results);
@@ -209,6 +215,7 @@ export const ContainerDetails = () => {
       })
       .catch((error) => {
         console.error('Load test failed', error);
+        if (redirectIfUnauthorized(error.response)) return;
         setLoadTestResults(null);
         setLoadTestFailed(true);
       })
