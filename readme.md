@@ -91,3 +91,24 @@ A plugin's pipeline is resolved in this order:
 3. Fallback: a file validation step
 
 Runs execute in a disposable `alpine:3.19` container with the plugin files mounted at `/work/<plugin>`.
+
+## Testing
+
+**Backend (pytest):** unit tests for the pure logic (auth helpers, password hashing/migration, CI step planning, serializers). Importing `container.py` needs a running Docker daemon.
+
+```bash
+cd backend
+./.venv/bin/pip install -r requirements-dev.txt   # once
+./.venv/bin/python -m pytest -q
+```
+
+**Frontend E2E (Playwright):** smoke test of the public UI. It assumes the whole stack is already running locally (backend services + Vite dev server on `http://localhost:3000`) — it never starts or stops anything.
+
+```bash
+cd frontend
+npm install                          # once
+npx playwright install chromium      # once (browser binaries)
+npm run e2e
+```
+
+The E2E suite is not part of CI; only the backend unit tests run there.

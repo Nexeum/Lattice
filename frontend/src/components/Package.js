@@ -25,7 +25,10 @@ import {
   ChevronDown,
   ChevronRight,
   AlertCircle,
-  History
+  History,
+  FileArchive,
+  Download,
+  Layers
 } from "lucide-react";
 import { authHeaders, getToken, redirectIfUnauthorized } from "../lib/api";
 import { toast } from "../lib/toast";
@@ -35,6 +38,12 @@ const CI_BASE = "http://localhost:5001";
 const README_NAMES = ["readme", "readme.md", "readme.txt"];
 const COPY_FEEDBACK_MS = 2000;
 const CI_POLL_MS = 2000;
+
+// Packages that ship a file named exactly "stack.json" are stack templates.
+const STACK_FILE_NAME = "stack.json";
+const isStackFile = (file) =>
+  Boolean(file) && typeof file.name === "string" && file.name === STACK_FILE_NAME;
+const hasStackFile = (files) => (Array.isArray(files) ? files : []).some(isStackFile);
 
 /* ------------------------------------------------------------------ */
 /* Tiny hand-rolled markdown renderer.                                 */
@@ -534,6 +543,18 @@ const formatCiDuration = (seconds) => {
   return `${Math.floor(total / 60)}m ${total % 60}s`;
 };
 
+const formatArtifactSize = (bytes) => {
+  if (typeof bytes !== "number" || Number.isNaN(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const artifactDownloadUrl = (runId, artifactId) =>
+  `${CI_BASE}/ci/runs/${runId}/artifacts/${artifactId}?token=${encodeURIComponent(
+    getToken() || ""
+  )}`;
+
 const runDurationSeconds = (run) => {
   const steps = Array.isArray(run.steps) ? run.steps : [];
   const stepSum = steps.reduce(
@@ -593,6 +614,7 @@ const TriggerBadge = ({ trigger }) => (
 const RunDetail = ({ run, onBack }) => {
   const [expandedSteps, setExpandedSteps] = useState({});
   const steps = Array.isArray(run.steps) ? run.steps : [];
+  const artifacts = Array.isArray(run.artifacts) ? run.artifacts : [];
   const failedIndex = steps.findIndex((step) => step?.status === "failed");
 
   useEffect(() => {
@@ -696,6 +718,45 @@ const RunDetail = ({ run, onBack }) => {
           This run has no steps.
         </div>
       )}
+
+      {artifacts.length > 0 && (
+        <div className="border-t border-gray-200">
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+            <FileArchive className="w-4 h-4 text-gray-500" />
+            <span className="text-sm font-semibold text-gray-900">Artifacts</span>
+            <span className="text-xs text-gray-500">
+              {artifacts.length} {artifacts.length === 1 ? "file" : "files"}
+            </span>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {artifacts.map((artifact) => {
+              const size = formatArtifactSize(artifact?.size);
+              return (
+                <div
+                  key={artifact?.id}
+                  className="flex items-center gap-3 px-4 py-2.5"
+                >
+                  <FileArchive className="w-4 h-4 text-gray-400 shrink-0" />
+                  <span className="text-sm text-gray-900 font-mono truncate flex-1">
+                    {artifact?.name || "unnamed artifact"}
+                  </span>
+                  {size && (
+                    <span className="text-xs text-gray-500 shrink-0">{size}</span>
+                  )}
+                  <a
+                    href={artifactDownloadUrl(run._id, artifact?.id)}
+                    download
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors shrink-0"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download</span>
+                  </a>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -788,6 +849,9 @@ const WorkflowEditor = ({ packageId, files, onSaved, onClose }) => {
       </div>
       <p className="text-xs text-gray-500 mb-2">
         image: any Docker image · steps run in order inside /work/&lt;plugin&gt;
+      </p>
+      <p className="text-xs text-gray-500 mb-2">
+        Files your steps write to artifacts/ are saved and downloadable from the run.
       </p>
       <textarea
         value={text}
@@ -1344,6 +1408,8 @@ export const Package = () => {
     { label: packageData.version ? `v${packageData.version}` : null, icon: null }
   ].filter((badge) => badge.label != null && badge.label !== "");
 
+  const isStackTemplate = hasStackFile(files);
+
   const aboutRows = [
     { label: "Language", value: packageData.language, icon: Code },
     { label: "Version", value: packageData.version, icon: Tag },
@@ -1380,8 +1446,14 @@ export const Package = () => {
                   {packageData.description}
                 </p>
               )}
-              {badges.length > 0 && (
+              {(badges.length > 0 || isStackTemplate) && (
                 <div className="flex flex-wrap gap-2">
+                  {isStackTemplate && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-purple-50 border border-purple-200 text-purple-700 rounded-full text-xs font-medium">
+                      <Layers className="w-3 h-3 text-purple-500" />
+                      Stack
+                    </span>
+                  )}
                   {badges.map((badge, index) => {
                     const BadgeIcon = badge.icon;
                     return (
@@ -1522,7 +1594,11 @@ export const Package = () => {
                           onClick={() => setSelectedFile(file)}
                           className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-gray-50 transition-colors group"
                         >
-                          <FileText className="w-4 h-4 text-gray-400 shrink-0" />
+                          {isStackFile(file) ? (
+                            <Layers className="w-4 h-4 text-purple-500 shrink-0" />
+                          ) : (
+                            <FileText className="w-4 h-4 text-gray-400 shrink-0" />
+                          )}
                           <span className="text-sm text-gray-900 font-mono group-hover:text-blue-600 group-hover:underline truncate">
                             {file?.name || "unnamed file"}
                           </span>

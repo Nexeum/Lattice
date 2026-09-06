@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Container, Menu, X, Code, LogOut, User } from "lucide-react";
+import { Container, Menu, X, Code, LogOut, User, Search, Moon, Sun } from "lucide-react";
 import { authHeaders } from "../lib/api";
+import { getTheme, toggleTheme } from "../lib/theme";
+import { openPalette } from "./CommandPalette";
 
 const USER_API_URL = "http://localhost:5005/userData";
 
@@ -9,6 +11,7 @@ export const NavbarRC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [userEmail, setUserEmail] = useState(null);
+  const [theme, setTheme] = useState(getTheme);
 
   const location = useLocation();
   const currentPath = location.pathname;
@@ -48,6 +51,10 @@ export const NavbarRC = () => {
     { to: "/", label: "Dashboard", icon: Container },
     { to: "/nodesly", label: "Nodes", icon: Container }
   ];
+
+  const handleToggleTheme = () => {
+    setTheme(toggleTheme());
+  };
 
   const handleLogout = () => {
     localStorage.removeItem("token");
@@ -91,6 +98,31 @@ export const NavbarRC = () => {
 
             {/* Right side actions */}
             <div className="hidden md:flex items-center space-x-3">
+              {/* Command palette trigger */}
+              <button
+                onClick={() => openPalette()}
+                className="flex items-center space-x-2 px-3 py-2 rounded-full text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-all duration-200"
+                aria-label="Open command palette"
+              >
+                <Search className="w-4 h-4" />
+                <kbd className="px-1.5 py-0.5 text-[10px] font-semibold text-gray-500 bg-gray-100 border border-gray-200 rounded">
+                  ⌘K
+                </kbd>
+              </button>
+
+              {/* Theme toggle */}
+              <button
+                onClick={handleToggleTheme}
+                className="w-8 h-8 rounded-full flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-colors"
+                aria-label="Toggle dark mode"
+              >
+                {theme === "dark" ? (
+                  <Sun className="w-4 h-4" />
+                ) : (
+                  <Moon className="w-4 h-4" />
+                )}
+              </button>
+
               {/* API Button - links to documentation */}
               <Link
                 to="/api-docs"
@@ -170,6 +202,32 @@ export const NavbarRC = () => {
 
               {/* Mobile API and Profile */}
               <div className="pt-4 border-t border-gray-100 space-y-2">
+                <button
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    openPalette();
+                  }}
+                  className="flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 text-sm font-medium w-full text-gray-600 hover:text-gray-900 hover:bg-gray-50"
+                >
+                  <Search className="w-4 h-4" />
+                  <span>Search</span>
+                  <kbd className="ml-auto px-1.5 py-0.5 text-[10px] font-semibold text-gray-500 bg-gray-100 border border-gray-200 rounded">
+                    ⌘K
+                  </kbd>
+                </button>
+
+                <button
+                  onClick={handleToggleTheme}
+                  className="flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 text-sm font-medium w-full text-gray-600 hover:text-gray-900 hover:bg-gray-50"
+                >
+                  {theme === "dark" ? (
+                    <Sun className="w-4 h-4" />
+                  ) : (
+                    <Moon className="w-4 h-4" />
+                  )}
+                  <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+                </button>
+
                 <Link
                   to="/api-docs"
                   onClick={() => setIsMenuOpen(false)}
