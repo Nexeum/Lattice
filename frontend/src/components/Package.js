@@ -1500,7 +1500,7 @@ const DiffLineRows = ({ ops }) => (
   </pre>
 );
 
-const FileDiff = ({ name, oldContent, newContent }) => {
+const FileDiff = ({ name, oldContent, newContent, changesetStatus }) => {
   const isNewFile = oldContent == null;
   const proposed = newContent == null ? "" : String(newContent);
   const unchanged = !isNewFile && String(oldContent) === proposed;
@@ -1527,9 +1527,24 @@ const FileDiff = ({ name, oldContent, newContent }) => {
         )}
       </div>
       {unchanged ? (
-        <div className="px-3 py-3 text-xs text-gray-500">
-          No changes to this file.
-        </div>
+        // For approved changesets the current file has already absorbed the
+        // change, so an empty diff is expected — show the proposed content.
+        changesetStatus === "approved" ? (
+          <div>
+            <div className="px-3 py-2 text-xs text-green-700 bg-green-50 border-b border-green-100">
+              This change was applied — showing the proposed content.
+            </div>
+            <div className="overflow-x-auto">
+              <pre className="text-xs font-mono leading-5 px-3 py-2 text-gray-700 min-w-max">
+                {proposed}
+              </pre>
+            </div>
+          </div>
+        ) : (
+          <div className="px-3 py-3 text-xs text-gray-500">
+            No changes to this file.
+          </div>
+        )
       ) : ops ? (
         <div className="overflow-x-auto">
           <DiffLineRows ops={ops} />
@@ -1572,6 +1587,24 @@ const ChangesetStatusDot = ({ status }) => {
       className={`inline-block w-2.5 h-2.5 rounded-full shrink-0 ${color}`}
       title={status}
     />
+  );
+};
+
+const CHANGESET_STATUS_CHIP_STYLES = {
+  pending: "bg-amber-50 border-amber-200 text-amber-700",
+  approved: "bg-green-50 border-green-200 text-green-700",
+  rejected: "bg-gray-100 border-gray-200 text-gray-600"
+};
+
+// Best-effort "who resolved it" for the detail header; the backend may not
+// send these fields, in which case nothing extra is shown.
+const changesetResolvedBy = (changeset) => {
+  if (!changeset || changeset.status === "pending") return null;
+  return (
+    changeset.approved_by ||
+    changeset.rejected_by ||
+    changeset.resolved_by ||
+    null
   );
 };
 
@@ -1658,6 +1691,10 @@ const ChangesetsPanel = ({
     const changedFiles = Array.isArray(selected.files) ? selected.files : [];
     const created = formatCiTime(selected.created_at);
     const isPending = selected.status === "pending";
+    const resolvedBy = changesetResolvedBy(selected);
+    const statusChipStyle =
+      CHANGESET_STATUS_CHIP_STYLES[selected.status] ||
+      CHANGESET_STATUS_CHIP_STYLES.rejected;
     return (
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3 bg-gray-50 border-b border-gray-200">
@@ -1669,7 +1706,14 @@ const ChangesetsPanel = ({
             >
               <ArrowLeft className="w-4 h-4" />
             </button>
-            <ChangesetStatusDot status={selected.status} />
+            <span
+              className={`inline-flex items-center gap-1 px-2.5 py-0.5 border rounded-full text-xs font-medium capitalize shrink-0 ${statusChipStyle}`}
+            >
+              {selected.status}
+              {resolvedBy && (
+                <span className="font-normal normal-case">by {resolvedBy}</span>
+              )}
+            </span>
             <span className="text-sm font-semibold text-gray-900 truncate">
               {selected.author_email || selected.author || "Unknown author"}
             </span>
@@ -1726,6 +1770,7 @@ const ChangesetsPanel = ({
                   name={file.name}
                   oldContent={current ? current.content : null}
                   newContent={file.content}
+                  changesetStatus={selected.status}
                 />
               );
             })
@@ -1768,7 +1813,11 @@ const ChangesetsPanel = ({
                 <ChangesetStatusDot status={entry.status} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-medium text-gray-900 truncate">
+                    <span
+                      className={`text-sm text-gray-900 truncate ${
+                        isPending ? "font-medium" : "font-normal"
+                      }`}
+                    >
                       {entry.author_email || entry.author || "Unknown author"}
                     </span>
                     {fileNames.map((name) => (
@@ -1789,21 +1838,20 @@ const ChangesetsPanel = ({
                 )}
               </>
             );
-            return isPending ? (
+            // Every row opens the detail view; pending rows stay visually
+            // highlighted, resolved ones read as normal (but not inert).
+            return (
               <button
                 key={entry._id}
                 onClick={() => openChangeset(entry)}
-                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
+                className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors ${
+                  isPending
+                    ? "bg-amber-50/60 hover:bg-amber-50"
+                    : "hover:bg-gray-50"
+                }`}
               >
                 {row}
               </button>
-            ) : (
-              <div
-                key={entry._id}
-                className="flex items-center gap-3 px-4 py-3 opacity-70"
-              >
-                {row}
-              </div>
             );
           })}
         </div>
@@ -2039,12 +2087,17 @@ const ReleasesCard = ({ packageId }) => {
 };
 
 /* ------------------------------------------------------------------ */
-/* Collaborators: owner-only sidebar card (hidden on 403).             */
+/* Collaborators: sidebar card visible to everyone. The list endpoint  */
+/* is open to any authenticated user; mutations stay owner/admin-only  */
+/* and surface their 403 as a toast.                                   */
 /* ------------------------------------------------------------------ */
+
+const COLLABORATOR_FORBIDDEN_MESSAGE =
+  "Only the owner or an admin can manage collaborators";
 
 const CollaboratorsCard = ({ packageId }) => {
   const [collaborators, setCollaborators] = useState(null);
-  const [visible, setVisible] = useState(false);
+  const [networkFailed, setNetworkFailed] = useState(false);
   const [email, setEmail] = useState("");
   const [addError, setAddError] = useState(null);
   const [adding, setAdding] = useState(false);
@@ -2058,17 +2111,19 @@ const CollaboratorsCard = ({ packageId }) => {
       );
       if (!response.ok) {
         if (redirectIfUnauthorized(response)) return;
-        // Non-owners get a 403 — hide the block silently (same for any
-        // other load failure; this is an owner-only convenience).
-        setVisible(false);
+        // The list is open to any authenticated user, so a non-ok
+        // response is transient — keep the card with an empty list.
+        setCollaborators([]);
+        setNetworkFailed(false);
         return;
       }
       const data = await response.json();
       setCollaborators(Array.isArray(data) ? data : []);
-      setVisible(true);
+      setNetworkFailed(false);
     } catch (error) {
       console.error("Error fetching collaborators:", error);
-      setVisible(false);
+      // Hard network failure only: hide the card.
+      setNetworkFailed(true);
     }
   }, [packageId]);
 
@@ -2096,6 +2151,10 @@ const CollaboratorsCard = ({ packageId }) => {
       );
       if (!response.ok) {
         if (redirectIfUnauthorized(response)) return;
+        if (response.status === 403) {
+          toast.error(COLLABORATOR_FORBIDDEN_MESSAGE);
+          return;
+        }
         if (response.status === 404) {
           setAddError("No user found with that email.");
           return;
@@ -2123,6 +2182,10 @@ const CollaboratorsCard = ({ packageId }) => {
       );
       if (!response.ok) {
         if (redirectIfUnauthorized(response)) return;
+        if (response.status === 403) {
+          toast.error(COLLABORATOR_FORBIDDEN_MESSAGE);
+          return;
+        }
         throw new Error(`Remove collaborator failed (${response.status})`);
       }
       toast.success(`Removed ${collaborator.email}`);
@@ -2135,16 +2198,24 @@ const CollaboratorsCard = ({ packageId }) => {
     }
   };
 
-  if (!visible || collaborators == null) return null;
+  if (networkFailed) return null;
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex items-center gap-2 mb-1">
         <Users className="w-4 h-4 text-gray-500" />
         <h3 className="text-sm font-semibold text-gray-900">Collaborators</h3>
       </div>
+      <p className="text-xs text-gray-500 mb-3">
+        Collaborators can upload files, approve changes and publish releases.
+      </p>
 
-      {collaborators.length > 0 ? (
+      {collaborators == null ? (
+        <div className="flex items-center gap-2 mb-3 text-sm text-gray-400">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <span>Loading collaborators...</span>
+        </div>
+      ) : collaborators.length > 0 ? (
         <div className="space-y-2 mb-3">
           {collaborators.map((collaborator) => (
             <div key={collaborator.id} className="flex items-center gap-2">
@@ -2198,6 +2269,134 @@ const CollaboratorsCard = ({ packageId }) => {
         </button>
       </div>
       {addError && <p className="text-sm text-red-600 mt-2">{addError}</p>}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Stack template explainer: shown in the Code tab for stack plugins.  */
+/* ------------------------------------------------------------------ */
+
+// Format a probe spec ({type, port, path} or plain string) for its chip.
+const formatStackProbe = (probe) => {
+  if (!probe) return null;
+  if (typeof probe === "string") return probe;
+  if (typeof probe === "object") {
+    const type = probe.type || probe.kind || "http";
+    const port = probe.port != null ? ` :${probe.port}` : "";
+    const path = typeof probe.path === "string" ? probe.path : "";
+    return `${type}${port}${path}`;
+  }
+  return null;
+};
+
+// Format an autoscale spec as "1–5 @70%". Returns null when not set.
+const formatStackAutoscale = (autoscale) => {
+  if (!autoscale || typeof autoscale !== "object") return null;
+  const min = autoscale.min ?? autoscale.min_replicas;
+  const max = autoscale.max ?? autoscale.max_replicas;
+  if (min == null || max == null) return null;
+  const target =
+    autoscale.cpu_percent ?? autoscale.target_cpu ?? autoscale.cpu ?? autoscale.target;
+  return target != null ? `${min}–${max} @${target}%` : `${min}–${max}`;
+};
+
+// Best-effort client-side parse of the package's stack.json. Returns a list
+// of normalized service specs, or null when the content is missing or not
+// parseable (the explainer then shows no preview — the deploy still works
+// server-side).
+const parseStackTemplateServices = (files) => {
+  const stackFile = (Array.isArray(files) ? files : []).find(isStackFile);
+  if (!stackFile || typeof stackFile.content !== "string") return null;
+  try {
+    const parsed = JSON.parse(stackFile.content);
+    if (!Array.isArray(parsed?.services)) return null;
+    return parsed.services
+      .filter((service) => service && typeof service === "object")
+      .map((service) => ({
+        name: String(service.name || ""),
+        image: String(service.image || ""),
+        replicas: typeof service.replicas === "number" ? service.replicas : null,
+        restart:
+          typeof service.restart === "string" && service.restart
+            ? service.restart
+            : null,
+        memory:
+          typeof service.memory === "string" && service.memory.trim()
+            ? service.memory.trim()
+            : null,
+        cpus:
+          service.cpus != null && String(service.cpus).trim() !== ""
+            ? String(service.cpus).trim()
+            : null,
+        probe: formatStackProbe(service.probe),
+        autoscale: formatStackAutoscale(service.autoscale)
+      }))
+      .filter((service) => service.name);
+  } catch {
+    // Malformed stack.json: skip the preview quietly, per design.
+    return null;
+  }
+};
+
+const StackServiceChip = ({ children }) => (
+  <span className="inline-flex items-center px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-[11px] font-medium shrink-0">
+    {children}
+  </span>
+);
+
+const StackTemplateCard = ({ files }) => {
+  const services = useMemo(() => parseStackTemplateServices(files), [files]);
+
+  return (
+    <div className="bg-purple-50 rounded-2xl shadow-sm border border-purple-200 p-5">
+      <div className="flex items-center gap-2 mb-2">
+        <Layers className="w-4 h-4 text-purple-600" />
+        <h3 className="text-sm font-semibold text-purple-900">Stack template</h3>
+      </div>
+      <p className="text-sm text-purple-800 leading-relaxed">
+        This plugin is a stack template: a set of services (image, replicas,
+        limits, probes) that deploy together inside a workspace. Open a
+        workspace and use Deploy Stack to run it.
+      </p>
+
+      {services && services.length > 0 && (
+        <div className="mt-4 space-y-2">
+          {services.map((service, index) => (
+            <div
+              key={`${service.name}-${index}`}
+              className="flex items-center gap-2 flex-wrap bg-white/70 border border-purple-100 rounded-xl px-3 py-2"
+            >
+              <span className="text-sm font-semibold text-gray-900">
+                {service.name}
+              </span>
+              {service.image && (
+                <span className="text-xs font-mono text-gray-600 truncate">
+                  {service.image}
+                </span>
+              )}
+              {service.replicas != null && (
+                <StackServiceChip>x{service.replicas}</StackServiceChip>
+              )}
+              {service.restart && (
+                <StackServiceChip>restart: {service.restart}</StackServiceChip>
+              )}
+              {service.memory && (
+                <StackServiceChip>mem {service.memory}</StackServiceChip>
+              )}
+              {service.cpus && (
+                <StackServiceChip>cpu {service.cpus}</StackServiceChip>
+              )}
+              {service.probe && (
+                <StackServiceChip>probe {service.probe}</StackServiceChip>
+              )}
+              {service.autoscale && (
+                <StackServiceChip>autoscale {service.autoscale}</StackServiceChip>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -2711,6 +2910,9 @@ export const Package = () => {
                     </div>
                   )}
                 </div>
+
+                {/* Stack template explainer */}
+                {isStackTemplate && <StackTemplateCard files={files} />}
 
                 {/* README */}
                 {readmeFile && (
