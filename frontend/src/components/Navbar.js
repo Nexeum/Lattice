@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Container, Menu, X, Code, LogOut, User } from "lucide-react";
+import { authHeaders } from "../lib/api";
 
 const USER_API_URL = "http://localhost:5005/userData";
 
@@ -18,9 +19,7 @@ export const NavbarRC = () => {
     const fetchUser = async () => {
       try {
         const response = await fetch(USER_API_URL, {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("token")}`,
-          },
+          headers: { ...authHeaders() },
         });
         if (!response.ok) {
           throw new Error(`User request failed with status ${response.status}`);

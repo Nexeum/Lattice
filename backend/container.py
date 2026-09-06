@@ -1,12 +1,14 @@
+import os
 import subprocess
 import json
 import io
 import tarfile
 import threading
 import datetime
-from fastapi import FastAPI, HTTPException
+import asyncio
+from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException
 import docker
 import psutil
 import requests
@@ -15,14 +17,27 @@ import numpy as np
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from auth_shared import require_user, require_user_query, decode_token, cors_origins, MONGO_URL
+
+def api_client_from_env():
+    """Low-level APIClient resolved like docker.from_env (DOCKER_HOST, then
+    the active docker context) — needed for interactive exec sockets."""
+    from docker.context import ContextAPI
+    from docker.utils import kwargs_from_env
+    params = kwargs_from_env()
+    if 'base_url' not in params:
+        for key, value in ContextAPI.kwargs_from_context().items():
+            params.setdefault(key, value)
+    return docker.APIClient(**params)
 
 client = docker.from_env()
+api_client = api_client_from_env()
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -121,11 +136,11 @@ def start_overload_test(container_id):
     }
 
 @app.get("/container/{id}/overload")
-async def start_overload_test_endpoint(id: str):
+async def start_overload_test_endpoint(id: str, user=Depends(require_user)):
     return start_overload_test(id)
 
 @app.get('/container/{container_id}/ip')
-async def get_container_ip(container_id: str):
+async def get_container_ip(container_id: str, user=Depends(require_user)):
     try:
         container = client.containers.get(container_id)
         ip_address = container.attrs['NetworkSettings']['IPAddress']
@@ -134,7 +149,7 @@ async def get_container_ip(container_id: str):
         return {'error': str(e)}
 
 @app.post('/exe/{container_id}/{command}')
-async def execute_command(container_id: str, command: str):
+async def execute_command(container_id: str, command: str, user=Depends(require_user)):
     try:
         container = client.containers.get(container_id)
         exec_id = container.exec_run(f"sh -c '{command}'", privileged=True)
@@ -148,7 +163,7 @@ async def execute_command(container_id: str, command: str):
         return {'error': str(e)}
     
 @app.post('/node/{outer_container_id}/{inner_container_id}/{command}')
-async def execute_nested_command(outer_container_id: str, inner_container_id: str, command: str):
+async def execute_nested_command(outer_container_id: str, inner_container_id: str, command: str, user=Depends(require_user)):
     try:
         outer_container = client.containers.get(outer_container_id)
         nested_command = f"docker exec --privileged {inner_container_id} sh -c '{command}'"
@@ -166,7 +181,7 @@ NODE_IMAGE = "docker:dind"
 NODE_DAEMON_TIMEOUT_SECONDS = 30
 
 @app.post("/containermain/{id}")
-async def create_container_main(id: str):
+async def create_container_main(id: str, user=Depends(require_user)):
     containers = {container.name: container for container in client.containers.list(all=True)}
     if id in containers:
         return {"message": f"Container {id} already exists"}
@@ -187,7 +202,7 @@ async def create_container_main(id: str):
     return {"message": f"Node {id} created; inner Docker daemon is still starting"}
 
 @app.get("/containers/{container_id}/ps")
-async def list_containers(container_id: str):
+async def list_containers(container_id: str, user=Depends(require_user)):
     container = client.containers.get(container_id)
     exec_id = container.exec_run("sh -c 'docker ps -a --format \"{{.ID}},{{.Names}},{{.Image}},{{.Status}}\"'", privileged=True)
     containers_info = exec_id.output.decode("utf-8").split("\n")
@@ -201,7 +216,7 @@ async def list_containers(container_id: str):
     return {"output": containers_with_ip}
 
 @app.get("/containers")
-async def get_containers():
+async def get_containers(user=Depends(require_user)):
     try:
         output = subprocess.check_output(["docker", "ps", "-a", "--format", "{{json .}}"])
         containers = [json.loads(line) for line in output.splitlines()]
@@ -231,7 +246,7 @@ async def get_containers():
         raise HTTPException(status_code=500, detail={'error': 'Failed to get containers', 'message': str(e)})
 
 @app.get("/container/{id}/metrics")
-async def get_container_metrics(id: str):
+async def get_container_metrics(id: str, user=Depends(require_user)):
     try:
         output = subprocess.check_output(["docker", "stats", id, "--no-stream", "--format", "{{json .}}"])
         metrics = json.loads(output)
@@ -240,13 +255,13 @@ async def get_container_metrics(id: str):
         raise HTTPException(status_code=500, detail={'error': 'Failed to get container metrics', 'message': str(e)})
     
 @app.get("/container/{container_id}/{name}/{image}/{shell}")
-async def create_container(container_id: str, name: str, image: str, shell: str):
+async def create_container(container_id: str, name: str, image: str, shell: str, user=Depends(require_user)):
     container = client.containers.get(container_id)
     exec_id = container.exec_run(f"sh -c 'docker run -dit --privileged --name {name} {image} {shell}'", privileged=True)
     return {"output": exec_id.output.decode("utf-8")}
 
 @app.get("/container/{id}/aprox")
-async def read_metrics(id: str):
+async def read_metrics(id: str, user=Depends(require_user)):
     try:
         container = client.containers.get(id)
         ports = container.attrs['NetworkSettings']['Ports']
@@ -266,11 +281,12 @@ async def read_metrics(id: str):
     except Exception as e:
         return {"error": str(e)}
 
-PACKAGES_SERVICE_URL = "http://localhost:5003"
+PACKAGES_SERVICE_URL = os.environ.get("LATTICE_PACKAGES_URL", "http://localhost:5003")
 PLUGINS_DIR = "/opt/lattice/plugins"
 
-def fetch_package_or_404(package_id: str):
-    response = requests.get(f"{PACKAGES_SERVICE_URL}/packages/{package_id}", timeout=15)
+def fetch_package_or_404(package_id: str, authorization: str = None):
+    headers = {"Authorization": authorization} if authorization else {}
+    response = requests.get(f"{PACKAGES_SERVICE_URL}/packages/{package_id}", headers=headers, timeout=15)
     if response.status_code != 200:
         raise HTTPException(status_code=404, detail="Package not found")
     package = response.json()
@@ -300,9 +316,9 @@ def run_install_script(container, package_name: str, files: list, docker_exec_pr
     return exec_id.output.decode("utf-8")
 
 @app.post("/container/{container_id}/install/{package_id}")
-async def install_package(container_id: str, package_id: str):
+async def install_package(container_id: str, package_id: str, user=Depends(require_user), authorization: str = Header(None)):
     try:
-        package, files = fetch_package_or_404(package_id)
+        package, files = fetch_package_or_404(package_id, authorization)
         package_name = package.get("name", package_id)
         container = client.containers.get(container_id)
 
@@ -322,9 +338,9 @@ async def install_package(container_id: str, package_id: str):
         raise HTTPException(status_code=500, detail={'error': 'Failed to install package', 'message': str(e)})
 
 @app.post("/node/{outer_container_id}/{inner_container_id}/install/{package_id}")
-async def install_package_nested(outer_container_id: str, inner_container_id: str, package_id: str):
+async def install_package_nested(outer_container_id: str, inner_container_id: str, package_id: str, user=Depends(require_user), authorization: str = Header(None)):
     try:
-        package, files = fetch_package_or_404(package_id)
+        package, files = fetch_package_or_404(package_id, authorization)
         package_name = package.get("name", package_id)
         outer = client.containers.get(outer_container_id)
 
@@ -364,7 +380,7 @@ async def install_package_nested(outer_container_id: str, inner_container_id: st
 # CI runs (GitHub-Actions-style pipelines for plugins)
 # ---------------------------------------------------------------------------
 
-ci_db = MongoClient('mongodb://localhost:27017/')['kubehub']
+ci_db = MongoClient(MONGO_URL)['kubehub']
 ci_runs = ci_db['ci_runs']
 
 CI_IMAGE = "alpine:3.19"
@@ -379,20 +395,28 @@ def serialize_run(doc):
     return doc
 
 def plan_ci_steps(files):
-    """Pipeline definition: lattice-ci.json ([{name, run}]) wins; otherwise
-    conventional steps derived from well-known files."""
+    """Pipeline definition: lattice-ci.json wins; it is either the legacy array
+    [{name, run}] or an object {"image": ..., "steps": [{name, run}]}. Falls
+    back to conventional steps derived from well-known files. Returns
+    (image, steps)."""
     by_name = {f["name"]: f for f in files}
     ci_file = by_name.get("lattice-ci.json")
+    image = CI_IMAGE
     if ci_file and ci_file.get("content"):
         try:
             parsed = json.loads(ci_file["content"])
+            raw_steps = parsed
+            if isinstance(parsed, dict):
+                raw_steps = parsed.get("steps")
+                if isinstance(parsed.get("image"), str) and parsed["image"].strip():
+                    image = parsed["image"].strip()
             steps = [
                 {"name": str(s["name"]), "run": str(s["run"])}
-                for s in parsed
+                for s in raw_steps
                 if isinstance(s, dict) and s.get("name") and s.get("run")
             ]
             if steps:
-                return steps
+                return image, steps
         except (ValueError, TypeError, KeyError):
             pass
 
@@ -403,15 +427,15 @@ def plan_ci_steps(files):
         steps.append({"name": "Test", "run": "sh test.sh"})
     if not steps:
         steps.append({"name": "Validate files", "run": "ls -la"})
-    return steps
+    return image, steps
 
-def execute_ci_run(run_id, package_name, files, steps):
+def execute_ci_run(run_id, package_name, files, steps, image=CI_IMAGE):
     workdir = f"/work/{package_name}"
     runner = None
     status = "success"
     try:
         runner = client.containers.run(
-            CI_IMAGE, "sleep 600", detach=True,
+            image, "sleep 600", detach=True,
             name=f"lattice-ci-{str(run_id)[-8:]}-{int(time.time())}",
         )
         runner.exec_run("sh -c 'mkdir -p /work'")
@@ -461,10 +485,10 @@ def execute_ci_run(run_id, package_name, files, steps):
         )
 
 @app.post("/ci/{package_id}/run")
-async def trigger_ci_run(package_id: str, trigger: str = "manual"):
-    package, files = fetch_package_or_404(package_id)
+async def trigger_ci_run(package_id: str, trigger: str = "manual", user=Depends(require_user), authorization: str = Header(None)):
+    package, files = fetch_package_or_404(package_id, authorization)
     package_name = package.get("name", package_id)
-    steps = plan_ci_steps(files)
+    image, steps = plan_ci_steps(files)
 
     last = ci_runs.find_one({"package_id": package_id}, sort=[("number", -1)])
     run_doc = {
@@ -473,6 +497,7 @@ async def trigger_ci_run(package_id: str, trigger: str = "manual"):
         "number": (last["number"] + 1) if last else 1,
         "status": "running",
         "trigger": trigger,
+        "image": image,
         "created_at": utc_now_iso(),
         "finished_at": None,
         "steps": [
@@ -484,18 +509,18 @@ async def trigger_ci_run(package_id: str, trigger: str = "manual"):
     run_id = ci_runs.insert_one(run_doc).inserted_id
 
     thread = threading.Thread(
-        target=execute_ci_run, args=(run_id, package_name, files, steps), daemon=True
+        target=execute_ci_run, args=(run_id, package_name, files, steps, image), daemon=True
     )
     thread.start()
     return serialize_run(ci_runs.find_one({"_id": run_id}))
 
 @app.get("/ci/{package_id}/runs")
-async def list_ci_runs(package_id: str):
+async def list_ci_runs(package_id: str, user=Depends(require_user)):
     docs = ci_runs.find({"package_id": package_id}).sort("number", -1).limit(30)
     return [serialize_run(d) for d in docs]
 
 @app.get("/ci/runs/{run_id}")
-async def get_ci_run(run_id: str):
+async def get_ci_run(run_id: str, user=Depends(require_user)):
     try:
         doc = ci_runs.find_one({"_id": ObjectId(run_id)})
     except Exception:
@@ -504,8 +529,41 @@ async def get_ci_run(run_id: str):
         raise HTTPException(status_code=404, detail="Run not found")
     return serialize_run(doc)
 
+CI_STREAM_MAX_SECONDS = 600
+CI_STREAM_POLL_SECONDS = 0.5
+
+@app.get("/ci/runs/{run_id}/stream")
+async def stream_ci_run(run_id: str, user=Depends(require_user_query)):
+    try:
+        object_id = ObjectId(run_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid run id")
+    if not ci_runs.find_one({"_id": object_id}):
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def gen():
+        last_payload = None
+        deadline = time.time() + CI_STREAM_MAX_SECONDS
+        while time.time() < deadline:
+            doc = ci_runs.find_one({"_id": object_id})
+            if not doc:
+                break
+            payload = json.dumps(serialize_run(doc))
+            if payload != last_payload:
+                last_payload = payload
+                yield f"data: {payload}\n\n"
+            if doc.get("status") != "running":
+                break
+            await asyncio.sleep(CI_STREAM_POLL_SECONDS)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
 @app.post("/container/{container_id}/start")
-async def start_container(container_id: str):
+async def start_container(container_id: str, user=Depends(require_user)):
     try:
         container = client.containers.get(container_id)
         container.start()
@@ -514,7 +572,7 @@ async def start_container(container_id: str):
         raise HTTPException(status_code=500, detail={'error': 'Failed to start container', 'message': str(e)})
 
 @app.get("/system/health")
-async def get_system_health():
+async def get_system_health(user=Depends(require_user)):
     try:
         return {
             "cpu": psutil.cpu_percent(interval=0.3),
@@ -524,8 +582,70 @@ async def get_system_health():
     except Exception as e:
         raise HTTPException(status_code=500, detail={'error': 'Failed to get system health', 'message': str(e)})
 
+@app.websocket("/ws/terminal/{container_id}")
+async def terminal_websocket(websocket: WebSocket, container_id: str, token: str = None, inner: str = None):
+    try:
+        decode_token(token or "")
+    except Exception:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+
+    sock = None
+    try:
+        cmd = ["docker", "exec", "-it", inner, "sh"] if inner else ["sh"]
+        exec_id = api_client.exec_create(container_id, cmd, tty=True, stdin=True)
+        sock = api_client.exec_start(exec_id, tty=True, socket=True)
+        sock._sock.setblocking(True)
+    except Exception:
+        await websocket.close(code=1011)
+        return
+
+    loop = asyncio.get_running_loop()
+
+    async def pump_output():
+        try:
+            while True:
+                data = await loop.run_in_executor(None, sock._sock.recv, 4096)
+                if not data:
+                    await websocket.close(code=1000)
+                    break
+                await websocket.send_bytes(data)
+        except Exception:
+            pass
+
+    reader = asyncio.ensure_future(pump_output())
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                sock._sock.send(message["bytes"])
+            elif message.get("text") is not None:
+                try:
+                    control = json.loads(message["text"])
+                    if control.get("type") == "resize":
+                        api_client.exec_resize(
+                            exec_id, height=int(control["rows"]), width=int(control["cols"])
+                        )
+                except Exception:
+                    pass
+    except WebSocketDisconnect:
+        pass
+    finally:
+        reader.cancel()
+        try:
+            sock.close()
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=1000)
+        except Exception:
+            pass
+
 @app.get("/topology")
-async def get_topology():
+async def get_topology(user=Depends(require_user)):
     try:
         networks = []
         for network in client.networks.list():

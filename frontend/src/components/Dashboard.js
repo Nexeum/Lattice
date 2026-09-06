@@ -13,6 +13,7 @@ import {
   Search,
   ArrowRight
 } from "lucide-react";
+import { authHeaders, redirectIfUnauthorized } from "../lib/api";
 
 const PACKAGES_API = "http://localhost:5003";
 const ENGINE_API = "http://localhost:5001";
@@ -46,7 +47,10 @@ export const Dashboard = () => {
     setPackagesLoading(true);
     setPackagesError(null);
     try {
-      const response = await fetch(`${PACKAGES_API}/packages`);
+      const response = await fetch(`${PACKAGES_API}/packages`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Packages request failed (${response.status})`);
       }
@@ -64,7 +68,10 @@ export const Dashboard = () => {
     setContainersLoading(true);
     setContainersError(null);
     try {
-      const response = await fetch(`${ENGINE_API}/containers`);
+      const response = await fetch(`${ENGINE_API}/containers`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Containers request failed (${response.status})`);
       }
@@ -82,7 +89,10 @@ export const Dashboard = () => {
     setNetworksLoading(true);
     setNetworksError(null);
     try {
-      const response = await fetch(`${ENGINE_API}/topology`);
+      const response = await fetch(`${ENGINE_API}/topology`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Topology request failed (${response.status})`);
       }
@@ -115,9 +125,10 @@ export const Dashboard = () => {
       };
       const response = await fetch(`${PACKAGES_API}/packages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Create request failed (${response.status})`);
       }

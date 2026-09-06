@@ -33,6 +33,8 @@ Local Docker orchestration platform. Manage workspaces backed by Docker-in-Docke
 
 ## Getting started
 
+Two options: run everything with Docker Compose (see below), or run the services manually:
+
 ```bash
 # Backend
 cd backend
@@ -46,6 +48,23 @@ npm start                 # http://localhost:3000
 ```
 
 Register a user from the UI and sign in. Every backend service exposes Swagger docs at `/docs` (e.g. http://localhost:5001/docs).
+
+## Docker Compose
+
+The whole stack (MongoDB + the four backend services + the frontend) can run in containers:
+
+```bash
+cp .env.example .env      # set LATTICE_SECRET_KEY (and DOCKER_SOCK if you use colima)
+docker compose up --build
+```
+
+Services and host ports match the table above: frontend on http://localhost:3000, auth on 5005, containers on 5001, rooms on 5002, packages on 5003, MongoDB on 27017 (persisted in the `mongo_data` named volume). No separate MongoDB install is needed in this mode.
+
+Notes:
+
+- **Docker socket:** the `containers` service orchestrates the **host** Docker daemon, so it mounts the host socket. Docker Desktop / Linux users need nothing extra (`/var/run/docker.sock` is the default). colima users must set `DOCKER_SOCK=~/.colima/default/docker.sock` in `.env`.
+- **Same-machine browsing only:** the frontend bundle calls the APIs at hardcoded `http://localhost:5001-5005` URLs. Since compose publishes those ports 1:1 on the host, everything works when you browse from the machine running compose — which is the intended use case. Accessing the dashboard from another machine won't work without further changes.
+- All backend services share one image (`backend/Dockerfile`); each compose service just overrides the `uvicorn` command.
 
 ## CLI
 

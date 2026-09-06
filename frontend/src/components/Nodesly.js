@@ -15,6 +15,7 @@ import {
   AlertCircle,
   RefreshCw
 } from "lucide-react";
+import { authHeaders, redirectIfUnauthorized } from "../lib/api";
 
 const ROOMS_API = "http://localhost:5002";
 const AUTH_API = "http://localhost:5005";
@@ -210,10 +211,10 @@ export const Nodesly = () => {
 
   const fetchCurrentUser = useCallback(async () => {
     try {
-      const token = localStorage.getItem("token");
       const response = await fetch(`${AUTH_API}/userData`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { ...authHeaders() }
       });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Auth service responded with ${response.status}`);
       }
@@ -233,7 +234,10 @@ export const Nodesly = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${ROOMS_API}/rooms`);
+      const response = await fetch(`${ROOMS_API}/rooms`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Rooms service responded with ${response.status}`);
       }
@@ -265,9 +269,10 @@ export const Nodesly = () => {
       };
       const response = await fetch(`${ROOMS_API}/rooms`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Create failed with status ${response.status}`);
       }
@@ -304,9 +309,10 @@ export const Nodesly = () => {
       };
       const response = await fetch(`${ROOMS_API}/rooms/${roomId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Update failed with status ${response.status}`);
       }
@@ -326,8 +332,10 @@ export const Nodesly = () => {
     setActionError(null);
     try {
       const response = await fetch(`${ROOMS_API}/rooms/${roomId}`, {
-        method: "DELETE"
+        method: "DELETE",
+        headers: { ...authHeaders() }
       });
+      if (redirectIfUnauthorized(response)) return;
       if (!response.ok) {
         throw new Error(`Delete failed with status ${response.status}`);
       }

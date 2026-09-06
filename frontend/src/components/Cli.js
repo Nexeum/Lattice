@@ -3,54 +3,54 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { Terminal as TerminalIcon } from "lucide-react";
+import { getToken } from "../lib/api";
 
-const API_BASE = "http://localhost:5001";
+const WS_BASE = "ws://localhost:5001";
 
 const ANSI = {
   reset: "\x1b[0m",
   green: "\x1b[32m",
   red: "\x1b[31m",
-  cyan: "\x1b[36m",
+  gray: "\x1b[90m",
   dim: "\x1b[2m",
   bold: "\x1b[1m",
   clearLine: "\x1b[2K\r",
 };
 
-const PROMPT = `${ANSI.green}$ ${ANSI.reset}`;
-
-const HELP_LINES = [
-  "Lattice Shell — available commands:",
-  "  help          Show this message",
-  "  clear         Clear the terminal",
-  "  <anything>    Runs inside the attached container via sh -c",
-  "",
-  "Examples:",
-  "  ls -la",
-  "  ps aux",
-  "  cat /etc/os-release",
-];
-
 const shortId = (id) => (typeof id === "string" ? id.slice(0, 12) : "");
 
-const toCrlf = (text) => text.replace(/\r?\n/g, "\r\n");
+const targetLabel = (containerId, innerContainerId) =>
+  innerContainerId
+    ? `${shortId(innerContainerId)} (via ${shortId(containerId)})`
+    : shortId(containerId);
+
+const buildWsUrl = (containerId, innerContainerId) => {
+  const params = new URLSearchParams({ token: getToken() });
+  if (innerContainerId) params.set("inner", innerContainerId);
+  return `${WS_BASE}/ws/terminal/${encodeURIComponent(containerId)}?${params.toString()}`;
+};
 
 export const Cli = ({ containerId, innerContainerId }) => {
   const wrapperRef = useRef(null);
   const termElRef = useRef(null);
   const termRef = useRef(null);
   const fitRef = useRef(null);
+  const wsRef = useRef(null);
+  const connectRef = useRef(null);
 
-  // Mutable terminal state — lives outside React's render cycle because
-  // xterm's onData callback fires outside of it.
-  const bufferRef = useRef("");
-  const historyRef = useRef([]);
-  const historyIndexRef = useRef(null);
-  const busyRef = useRef(false);
-  const targetRef = useRef({ containerId, innerContainerId });
-  const prevInnerRef = useRef(innerContainerId);
+  // Reads refs only, so it is safe to call from either effect.
+  const sendResize = () => {
+    const ws = wsRef.current;
+    const term = termRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !term) return;
+    ws.send(
+      JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows })
+    );
+  };
+  const sendResizeRef = useRef(sendResize);
+  sendResizeRef.current = sendResize;
 
-  targetRef.current = { containerId, innerContainerId };
-
+  // Mount-once: terminal, fit addon, resize tracking, raw input forwarding.
   useEffect(() => {
     const term = new Terminal({
       cursorBlink: true,
@@ -78,194 +78,31 @@ export const Cli = ({ containerId, innerContainerId }) => {
       if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
       try {
         fitAddon.fit();
+        sendResizeRef.current();
       } catch (error) {
         console.error("Terminal fit failed:", error);
       }
     };
 
-    const writePrompt = () => {
-      term.write(PROMPT + bufferRef.current);
-    };
-
-    const redrawInputLine = () => {
-      term.write(ANSI.clearLine);
-      writePrompt();
-    };
-
-    const printBanner = () => {
-      const { containerId: cid, innerContainerId: iid } = targetRef.current;
-      const target = iid
-        ? `nested container ${shortId(iid)} (via node ${shortId(cid)})`
-        : cid
-          ? `container ${shortId(cid)}`
-          : null;
-      term.writeln(`${ANSI.bold}Lattice Shell${ANSI.reset}`);
-      term.writeln(
-        ANSI.dim +
-          (target
-            ? `Connected to ${target}. Type 'help' for available commands.`
-            : "No container attached. Commands cannot be executed.") +
-          ANSI.reset
-      );
-      term.writeln("");
-    };
-
-    const executeRemote = async (command) => {
-      const { containerId: cid, innerContainerId: iid } = targetRef.current;
-      const encodedCommand = encodeURIComponent(command);
-      const url = iid
-        ? `${API_BASE}/node/${encodeURIComponent(cid)}/${encodeURIComponent(iid)}/${encodedCommand}`
-        : `${API_BASE}/exe/${encodeURIComponent(cid)}/${encodedCommand}`;
-
-      const response = await fetch(url, { method: "POST" });
-      let data = null;
-      try {
-        data = await response.json();
-      } catch (parseError) {
-        data = null;
-      }
-
-      if (data && typeof data.error === "string" && data.error.length > 0) {
-        return { error: data.error };
-      }
-      if (data && typeof data.output === "string") {
-        return { output: data.output };
-      }
-      if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}`);
-      }
-      return { output: "" };
-    };
-
-    const runCommand = async (command) => {
-      busyRef.current = true;
-      term.write(`${ANSI.dim}…running${ANSI.reset}`);
-      try {
-        const result = await executeRemote(command);
-        term.write(ANSI.clearLine);
-        if (result.error) {
-          term.write(toCrlf(`${ANSI.red}${result.error}${ANSI.reset}`));
-          term.write("\r\n");
-        } else if (result.output.length > 0) {
-          term.write(toCrlf(result.output));
-          if (!result.output.endsWith("\n")) term.write("\r\n");
-        }
-      } catch (error) {
-        console.error("Command execution failed:", error);
-        const message =
-          error instanceof Error ? error.message : "unknown error";
-        term.write(ANSI.clearLine);
-        term.write(
-          `${ANSI.red}Failed to execute command: ${message}${ANSI.reset}\r\n`
-        );
-      } finally {
-        busyRef.current = false;
-        // Re-render prompt plus anything typed while the command ran.
-        writePrompt();
-      }
-    };
-
-    const handleEnter = () => {
-      if (busyRef.current) return; // one command in flight at a time
-
-      const command = bufferRef.current.trim();
-      bufferRef.current = "";
-      historyIndexRef.current = null;
-      term.write("\r\n");
-
-      if (!command) {
-        writePrompt();
+    // The remote shell owns echo, line editing, history, signals — every
+    // keystroke goes straight to it as binary. When the socket is gone,
+    // pressing Enter reconnects.
+    const dataDisposable = term.onData((data) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(new TextEncoder().encode(data));
         return;
       }
-
-      historyRef.current = [...historyRef.current, command];
-
-      if (command === "clear") {
-        term.clear();
-        term.write(ANSI.clearLine);
-        writePrompt();
-        return;
+      const closed =
+        !ws ||
+        ws.readyState === WebSocket.CLOSED ||
+        ws.readyState === WebSocket.CLOSING;
+      if (closed && data.includes("\r") && connectRef.current) {
+        connectRef.current();
       }
+    });
 
-      if (command === "help") {
-        HELP_LINES.forEach((line) => term.writeln(line));
-        writePrompt();
-        return;
-      }
-
-      if (!targetRef.current.containerId) {
-        term.writeln(
-          `${ANSI.red}No container attached — cannot execute commands.${ANSI.reset}`
-        );
-        writePrompt();
-        return;
-      }
-
-      runCommand(command);
-    };
-
-    const handleBackspace = () => {
-      if (bufferRef.current.length === 0) return;
-      bufferRef.current = bufferRef.current.slice(0, -1);
-      if (!busyRef.current) term.write("\b \b");
-    };
-
-    const navigateHistory = (direction) => {
-      if (busyRef.current) return;
-      const history = historyRef.current;
-      if (history.length === 0) return;
-
-      const current = historyIndexRef.current;
-      let next;
-      if (direction === "up") {
-        next = current === null ? history.length - 1 : Math.max(current - 1, 0);
-      } else {
-        if (current === null) return;
-        next = current + 1 >= history.length ? null : current + 1;
-      }
-
-      historyIndexRef.current = next;
-      bufferRef.current = next === null ? "" : history[next];
-      redrawInputLine();
-    };
-
-    const handlePrintable = (chunk) => {
-      if (chunk.length === 0) return;
-      bufferRef.current += chunk;
-      if (!busyRef.current) term.write(chunk);
-    };
-
-    const handleData = (data) => {
-      // Escape sequences arrive as a single chunk.
-      if (data.startsWith("\x1b")) {
-        if (data === "\x1b[A") navigateHistory("up");
-        else if (data === "\x1b[B") navigateHistory("down");
-        // Ignore all other control sequences (arrows left/right, F-keys, …).
-        return;
-      }
-
-      let printable = "";
-      for (const char of data) {
-        if (char === "\r" || char === "\n") {
-          handlePrintable(printable);
-          printable = "";
-          handleEnter();
-        } else if (char === "\x7f") {
-          handlePrintable(printable);
-          printable = "";
-          handleBackspace();
-        } else if (char >= " ") {
-          printable += char;
-        }
-        // Other control characters are dropped.
-      }
-      handlePrintable(printable);
-    };
-
-    const dataDisposable = term.onData(handleData);
-
-    printBanner();
-    writePrompt();
+    term.writeln(`${ANSI.bold}Lattice Shell${ANSI.reset}`);
 
     // Fit once layout and fonts have settled, then track wrapper resizes.
     const rafId = requestAnimationFrame(safeFit);
@@ -282,28 +119,102 @@ export const Cli = ({ containerId, innerContainerId }) => {
       termRef.current = null;
       fitRef.current = null;
     };
-    // Intentionally mount-once: prop changes are read through targetRef.
   }, []);
 
-  // Announce target changes (e.g. user selects a nested container)
-  // without resetting scrollback.
+  // Connection lifecycle: (re)connect from scratch whenever the target
+  // changes; tear the socket down on change and unmount.
   useEffect(() => {
-    if (prevInnerRef.current === innerContainerId) return;
-    prevInnerRef.current = innerContainerId;
+    const teardown = () => {
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (!ws) return;
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      try {
+        ws.close(1000);
+      } catch (error) {
+        console.error("Terminal socket close failed:", error);
+      }
+    };
 
-    const term = termRef.current;
-    if (!term) return;
+    const connect = () => {
+      teardown();
+      const term = termRef.current;
+      if (!term) return;
 
-    const message = innerContainerId
-      ? `→ executing inside ${shortId(innerContainerId)}`
-      : `→ back to node ${shortId(containerId)}`;
+      if (!containerId) {
+        term.writeln(
+          `${ANSI.dim}No container attached. Commands cannot be executed.${ANSI.reset}`
+        );
+        return;
+      }
 
-    term.write(ANSI.clearLine);
-    term.writeln(`${ANSI.cyan}${message}${ANSI.reset}`);
-    if (!busyRef.current) {
-      term.write(PROMPT + bufferRef.current);
-    }
-  }, [innerContainerId, containerId]);
+      // Status line is written without a trailing newline so it can be
+      // replaced in place once the connection resolves.
+      term.write(
+        `${ANSI.dim}connecting to ${targetLabel(containerId, innerContainerId)}…${ANSI.reset}`
+      );
+
+      let ws;
+      try {
+        ws = new WebSocket(buildWsUrl(containerId, innerContainerId));
+      } catch (error) {
+        console.error("Terminal socket open failed:", error);
+        term.write(ANSI.clearLine);
+        term.writeln(
+          `${ANSI.red}failed to open terminal connection${ANSI.reset}`
+        );
+        return;
+      }
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (wsRef.current !== ws) return;
+        term.write(ANSI.clearLine);
+        term.writeln(
+          `${ANSI.green}connected to ${targetLabel(containerId, innerContainerId)}${ANSI.reset}`
+        );
+        sendResizeRef.current();
+      };
+
+      ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return;
+        if (event.data instanceof ArrayBuffer) {
+          term.write(new Uint8Array(event.data));
+        }
+      };
+
+      ws.onerror = (event) => {
+        console.error("Terminal socket error:", event);
+      };
+
+      ws.onclose = (event) => {
+        if (wsRef.current !== ws) return;
+        wsRef.current = null;
+        term.write(ANSI.clearLine);
+        if (event.code === 4401) {
+          term.writeln(
+            `${ANSI.red}session expired — refresh and sign in${ANSI.reset}`
+          );
+        } else {
+          term.writeln(
+            `${ANSI.gray}session ended — press Enter to reconnect${ANSI.reset}`
+          );
+        }
+      };
+    };
+
+    connectRef.current = connect;
+    connect();
+
+    return () => {
+      connectRef.current = null;
+      teardown();
+    };
+  }, [containerId, innerContainerId]);
 
   return (
     <div
