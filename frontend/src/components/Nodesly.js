@@ -13,12 +13,26 @@ import {
   Search,
   Trash2,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Server,
+  Loader
 } from "lucide-react";
 import { authHeaders, redirectIfUnauthorized } from "../lib/api";
+import { toast } from "../lib/toast";
 
 const ROOMS_API = "http://localhost:5002";
 const AUTH_API = "http://localhost:5005";
+const CONTAINERS_API = "http://localhost:5001";
+
+/** Shown whenever GET /hosts is unavailable — the local daemon always exists. */
+const LOCAL_ONLY_HOSTS = [{ id: "local", name: "local", url: null, status: "up" }];
+
+const HostStatusDot = ({ status }) => {
+  const s = String(status || "").toLowerCase();
+  const color =
+    s === "up" ? "bg-green-500" : s === "down" ? "bg-red-500" : "bg-gray-300";
+  return <span className={`w-2 h-2 rounded-full flex-shrink-0 ${color}`}></span>;
+};
 
 // Workspace Card Component
 const WorkspaceCard = ({ room, currentUserId, onJoin, onUpdate, onDelete }) => {
@@ -209,6 +223,118 @@ export const Nodesly = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showJoinPassword, setShowJoinPassword] = useState(false);
 
+  // Multi-host: available Docker hosts (containers service). Degrades to
+  // local-only when the /hosts endpoint isn't available yet.
+  const [hosts, setHosts] = useState(LOCAL_ONLY_HOSTS);
+  const [hostsLoading, setHostsLoading] = useState(false);
+  const [hostsError, setHostsError] = useState(null);
+  const [selectedHost, setSelectedHost] = useState("local");
+  const [hostsModal, setHostsModal] = useState(false);
+  const [newHostName, setNewHostName] = useState("");
+  const [newHostUrl, setNewHostUrl] = useState("");
+  const [addingHost, setAddingHost] = useState(false);
+  const [addHostError, setAddHostError] = useState(null);
+  const [removingHostId, setRemovingHostId] = useState(null);
+
+  const fetchHosts = useCallback(async () => {
+    setHostsLoading(true);
+    setHostsError(null);
+    try {
+      const response = await fetch(`${CONTAINERS_API}/hosts`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`Hosts endpoint responded with ${response.status}`);
+      }
+      const data = await response.json();
+      setHosts(Array.isArray(data) && data.length > 0 ? data : LOCAL_ONLY_HOSTS);
+    } catch (err) {
+      // Backend piece may not be live yet — degrade to local-only silently.
+      console.error("Could not load hosts, falling back to local:", err);
+      setHosts(LOCAL_ONLY_HOSTS);
+      setHostsError(
+        "Could not load remote hosts. Only the local Docker daemon is available."
+      );
+    } finally {
+      setHostsLoading(false);
+    }
+  }, []);
+
+  const handleAddHost = async () => {
+    const name = newHostName.trim();
+    const url = newHostUrl.trim();
+    if (!name || !url) return;
+    setAddingHost(true);
+    setAddHostError(null);
+    try {
+      const response = await fetch(`${CONTAINERS_API}/hosts`, {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ name, url })
+      });
+      if (redirectIfUnauthorized(response)) return;
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (parseErr) {
+        console.error("Could not parse add-host response:", parseErr);
+      }
+      if (!response.ok) {
+        throw new Error(
+          String(body?.detail || `Adding the host failed with status ${response.status}`)
+        );
+      }
+      if (body && body.name) {
+        setHosts((prev) => [...prev, body]);
+      } else {
+        await fetchHosts();
+      }
+      setNewHostName("");
+      setNewHostUrl("");
+      toast.success(`Host ${name} added`);
+    } catch (err) {
+      console.error("Error adding host:", err);
+      setAddHostError(err instanceof Error ? err.message : "Could not add the host.");
+      toast.error(`Could not add host ${name}`);
+    } finally {
+      setAddingHost(false);
+    }
+  };
+
+  const handleRemoveHost = async (host) => {
+    if (!host?.id || host.name === "local") return;
+    setRemovingHostId(host.id);
+    setAddHostError(null);
+    try {
+      const response = await fetch(
+        `${CONTAINERS_API}/hosts/${encodeURIComponent(host.id)}`,
+        { method: "DELETE", headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`Delete failed with status ${response.status}`);
+      }
+      setHosts((prev) => prev.filter((h) => h.id !== host.id));
+      setSelectedHost((prev) => (prev === host.name ? "local" : prev));
+      toast.success(`Host ${host.name} removed`);
+    } catch (err) {
+      console.error("Error removing host:", err);
+      setAddHostError(`Could not remove host ${host.name}. Please try again.`);
+      toast.error(`Could not remove host ${host.name}`);
+    } finally {
+      setRemovingHostId(null);
+    }
+  };
+
+  const openHostsModal = () => {
+    setAddHostError(null);
+    setNewHostName("");
+    setNewHostUrl("");
+    setHostsModal(true);
+    fetchHosts();
+  };
+
   const fetchCurrentUser = useCallback(async () => {
     try {
       const response = await fetch(`${AUTH_API}/userData`, {
@@ -257,6 +383,13 @@ export const Nodesly = () => {
     fetchRooms();
   }, [fetchCurrentUser, fetchRooms]);
 
+  const openCreateModal = () => {
+    setSelectedHost("local");
+    setActionError(null);
+    setOpenModal(true);
+    fetchHosts();
+  };
+
   const handleCreateRoom = async () => {
     setCreating(true);
     setActionError(null);
@@ -265,7 +398,8 @@ export const Nodesly = () => {
         name: roomName.trim(),
         is_private: isPrivate === "private",
         password: isPrivate === "private" ? password : "",
-        owner: currentUserId || "local"
+        owner: currentUserId || "local",
+        host: selectedHost || "local"
       };
       const response = await fetch(`${ROOMS_API}/rooms`, {
         method: "POST",
@@ -287,9 +421,12 @@ export const Nodesly = () => {
       setRoomName("");
       setPassword("");
       setIsPrivate("public");
+      setSelectedHost("local");
+      toast.success(`Workspace "${body.name}" created`);
     } catch (err) {
       console.error("Error creating workspace:", err);
       setActionError("Could not create the workspace. Please try again.");
+      toast.error("Could not create the workspace");
     } finally {
       setCreating(false);
     }
@@ -340,9 +477,11 @@ export const Nodesly = () => {
         throw new Error(`Delete failed with status ${response.status}`);
       }
       setRooms((prev) => prev.filter((r) => r._id !== roomId));
+      toast.success("Workspace deleted");
     } catch (err) {
       console.error("Error deleting workspace:", err);
       setActionError("Could not delete the workspace. Please try again.");
+      toast.error("Could not delete the workspace");
     }
   };
 
@@ -384,13 +523,23 @@ export const Nodesly = () => {
             <h1 className="text-3xl font-light text-gray-900 mb-2">Workspaces</h1>
             <p className="text-gray-600">Collaborate with your team in shared environments</p>
           </div>
-          <button
-            onClick={() => setOpenModal(true)}
-            className="group flex items-center space-x-2 px-6 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium shadow-sm hover:shadow-md"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Create Workspace</span>
-          </button>
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={openHostsModal}
+              title="Manage Docker hosts"
+              className="flex items-center space-x-2 px-4 py-3 text-gray-500 hover:text-gray-900 hover:bg-white rounded-full border border-gray-200 transition-all duration-200 text-sm font-medium"
+            >
+              <Server className="w-4 h-4" />
+              <span>Hosts</span>
+            </button>
+            <button
+              onClick={openCreateModal}
+              className="group flex items-center space-x-2 px-6 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium shadow-sm hover:shadow-md"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Create Workspace</span>
+            </button>
+          </div>
         </div>
 
         {/* Search */}
@@ -529,7 +678,7 @@ export const Nodesly = () => {
                 </p>
                 {!searchTerm && (
                   <button
-                    onClick={() => setOpenModal(true)}
+                    onClick={openCreateModal}
                     className="px-6 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium"
                   >
                     Create Workspace
@@ -589,6 +738,36 @@ export const Nodesly = () => {
                   <option value="public">Public - Anyone can join</option>
                   <option value="private">Private - Password required</option>
                 </select>
+              </div>
+
+              <div>
+                <label htmlFor="workspaceHost" className="block text-sm font-medium text-gray-700 mb-2">
+                  Host
+                </label>
+                {hostsLoading ? (
+                  <div className="flex items-center space-x-2 text-gray-400 text-sm py-3">
+                    <Loader className="w-4 h-4 animate-spin" />
+                    <span>Loading hosts...</span>
+                  </div>
+                ) : (
+                  <select
+                    id="workspaceHost"
+                    value={selectedHost}
+                    onChange={(e) => setSelectedHost(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-black focus:border-transparent outline-none transition-all duration-200"
+                  >
+                    {hosts.map((h) => (
+                      <option key={h.id || h.name} value={h.name}>
+                        {h.name}
+                        {String(h.status || "").toLowerCase() === "down" ? " (down)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <p className="text-xs text-gray-400 mt-2">
+                  Where this workspace&apos;s containers will run. Manage hosts from
+                  the Hosts button.
+                </p>
               </div>
 
               {isPrivate === "private" && (
@@ -715,6 +894,145 @@ export const Nodesly = () => {
                   className="px-6 py-3 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all duration-200 font-medium"
                 >
                   Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hosts Management Modal */}
+      {hostsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div
+            className="absolute inset-0 bg-black bg-opacity-50 backdrop-blur-sm"
+            onClick={() => !addingHost && setHostsModal(false)}
+          ></div>
+
+          <div className="relative bg-white rounded-3xl shadow-xl max-w-lg w-full p-8 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center space-x-3">
+                <Server className="w-5 h-5 text-gray-500" />
+                <h2 className="text-xl font-medium text-gray-900">Docker Hosts</h2>
+              </div>
+              <button
+                onClick={() => setHostsModal(false)}
+                className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-6">
+              {hostsError && (
+                <div className="flex items-center space-x-2 text-orange-600 text-sm bg-orange-50 px-4 py-3 rounded-xl border border-orange-100">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{hostsError}</span>
+                  <button
+                    onClick={fetchHosts}
+                    title="Retry"
+                    className="ml-auto text-orange-500 hover:text-orange-700 transition-colors"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              {hostsLoading ? (
+                <div className="flex items-center justify-center space-x-2 text-gray-400 text-sm py-6">
+                  <Loader className="w-4 h-4 animate-spin" />
+                  <span>Loading hosts...</span>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {hosts.map((h) => {
+                    const isLocalHost = h.name === "local" || !h.url;
+                    return (
+                      <div
+                        key={h.id || h.name}
+                        className="flex items-center justify-between px-4 py-3 border border-gray-100 rounded-xl"
+                      >
+                        <div className="flex items-center space-x-3 min-w-0">
+                          <HostStatusDot status={h.status} />
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-gray-900 truncate">
+                              {h.name}
+                            </p>
+                            <p className="text-xs text-gray-400 font-mono truncate">
+                              {h.url || "local daemon"}
+                            </p>
+                          </div>
+                        </div>
+                        {!isLocalHost && (
+                          <button
+                            onClick={() => handleRemoveHost(h)}
+                            disabled={removingHostId === h.id}
+                            title={`Remove ${h.name}`}
+                            className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200 disabled:opacity-50 flex-shrink-0"
+                          >
+                            {removingHostId === h.id ? (
+                              <Loader className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-4 h-4" />
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Add host form */}
+              <div className="pt-2 border-t border-gray-100 space-y-3">
+                <p className="text-sm font-medium text-gray-700">Add a host</p>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  value={newHostName}
+                  onChange={(e) => setNewHostName(e.target.value)}
+                  disabled={addingHost}
+                  placeholder="Name, e.g. vps-1"
+                  className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-black focus:border-transparent outline-none transition-all duration-200 disabled:opacity-50"
+                />
+                <input
+                  type="text"
+                  autoComplete="off"
+                  value={newHostUrl}
+                  onChange={(e) => setNewHostUrl(e.target.value)}
+                  disabled={addingHost}
+                  placeholder="tcp://host:2375"
+                  className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-black focus:border-transparent outline-none transition-all duration-200 font-mono text-sm disabled:opacity-50"
+                />
+                <p className="text-xs text-gray-400">
+                  The remote Docker daemon must expose its API at this address
+                  (e.g. <span className="font-mono">dockerd -H tcp://0.0.0.0:2375</span>).
+                  Connectivity is verified when you add it.
+                </p>
+
+                {addHostError && (
+                  <div className="flex items-center space-x-2 text-red-600 text-sm bg-red-50 px-4 py-3 rounded-xl border border-red-100">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span className="break-words">{addHostError}</span>
+                  </div>
+                )}
+
+                <button
+                  onClick={handleAddHost}
+                  disabled={addingHost || !newHostName.trim() || !newHostUrl.trim()}
+                  className="w-full px-6 py-3 bg-black text-white rounded-xl hover:bg-gray-800 transition-all duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                >
+                  {addingHost ? (
+                    <>
+                      <Loader className="w-4 h-4 mr-2 animate-spin" />
+                      Verifying...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-4 h-4 mr-2" />
+                      Add Host
+                    </>
+                  )}
                 </button>
               </div>
             </div>

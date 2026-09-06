@@ -20,12 +20,15 @@ import {
   Loader2,
   Circle,
   Slash,
+  Clock,
+  Settings2,
   ChevronDown,
   ChevronRight,
   AlertCircle,
   History
 } from "lucide-react";
 import { authHeaders, getToken, redirectIfUnauthorized } from "../lib/api";
+import { toast } from "../lib/toast";
 
 const API_BASE = "http://localhost:5003";
 const CI_BASE = "http://localhost:5001";
@@ -545,8 +548,28 @@ const runDurationSeconds = (run) => {
   return null;
 };
 
+// A run is "active" (still progressing, worth streaming/polling) while it is
+// waiting in the queue, starting its runner, or actually running.
+const ACTIVE_RUN_STATUSES = ["queued", "starting", "running"];
+const isActiveRun = (status) => ACTIVE_RUN_STATUSES.includes(status);
+
+// Human label for an active run; null for terminal states.
+const runStatusLabel = (run) => {
+  if (run.status === "queued") {
+    return typeof run.queue_position === "number"
+      ? `Queued · #${run.queue_position} in line`
+      : "Queued";
+  }
+  if (run.status === "starting") return "Starting runner…";
+  if (run.status === "running") return "In progress";
+  return null;
+};
+
 const CiStatusIcon = ({ status, className = "w-4 h-4" }) => {
-  if (status === "running") {
+  if (status === "queued") {
+    return <Clock className={`${className} text-gray-400 shrink-0`} />;
+  }
+  if (status === "starting" || status === "running") {
     return <Loader2 className={`${className} text-amber-500 animate-spin shrink-0`} />;
   }
   if (status === "success") {
@@ -601,6 +624,15 @@ const RunDetail = ({ run, onBack }) => {
             CI pipeline #{run.number}
           </span>
           <TriggerBadge trigger={run.trigger} />
+          {isActiveRun(run.status) && (
+            <span
+              className={`text-xs font-medium shrink-0 ${
+                run.status === "queued" ? "text-gray-500" : "text-amber-600"
+              }`}
+            >
+              {runStatusLabel(run)}
+            </span>
+          )}
           {run.image && (
             <span
               className="text-[11px] font-mono text-gray-400 truncate hidden sm:inline"
@@ -668,14 +700,181 @@ const RunDetail = ({ run, onBack }) => {
   );
 };
 
-const ActionsPanel = ({ packageId, refreshKey }) => {
+/* ------------------------------------------------------------------ */
+/* Workflow editor: edit lattice-ci.json in place, GitHub-style.       */
+/* ------------------------------------------------------------------ */
+
+const WORKFLOW_FILE_NAME = "lattice-ci.json";
+const WORKFLOW_TEMPLATE = `{
+  "image": "alpine:3.19",
+  "steps": [
+    { "name": "Install", "run": "sh install.sh" }
+  ]
+}`;
+
+const findWorkflowFile = (files) =>
+  (Array.isArray(files) ? files : []).find(
+    (file) =>
+      file &&
+      typeof file.name === "string" &&
+      file.name.toLowerCase() === WORKFLOW_FILE_NAME
+  );
+
+const WorkflowEditor = ({ packageId, files, onSaved, onClose }) => {
+  const [text, setText] = useState(() => {
+    const existing = findWorkflowFile(files);
+    return existing && existing.content != null
+      ? String(existing.content)
+      : WORKFLOW_TEMPLATE;
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [savedNote, setSavedNote] = useState(false);
+
+  const handleChange = (event) => {
+    setText(event.target.value);
+    setSavedNote(false);
+  };
+
+  const handleSave = async () => {
+    if (saving) return;
+    setError(null);
+    setSavedNote(false);
+
+    // Validate client-side before sending anything.
+    try {
+      JSON.parse(text);
+    } catch (parseError) {
+      setError(
+        `Invalid JSON: ${
+          parseError instanceof Error ? parseError.message : "could not parse"
+        }`
+      );
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const blob = new Blob([text], { type: "application/json" });
+      const fd = new FormData();
+      fd.append("file", blob, WORKFLOW_FILE_NAME);
+      // No manual Content-Type: the browser sets the multipart boundary.
+      const response = await fetch(`${API_BASE}/packages/${packageId}/files`, {
+        method: "POST",
+        headers: { ...authHeaders() },
+        body: fd
+      });
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        throw new Error(`Workflow save failed (${response.status})`);
+      }
+      setSavedNote(true);
+      onSaved();
+    } catch (saveError) {
+      console.error("Error saving workflow file:", saveError);
+      setError("Could not save the workflow. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="px-4 py-4 bg-gray-50 border-b border-gray-200">
+      <div className="flex items-center gap-2 mb-2">
+        <Settings2 className="w-4 h-4 text-gray-500" />
+        <span className="text-sm font-semibold text-gray-900 font-mono">
+          {WORKFLOW_FILE_NAME}
+        </span>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        image: any Docker image · steps run in order inside /work/&lt;plugin&gt;
+      </p>
+      <textarea
+        value={text}
+        onChange={handleChange}
+        rows={12}
+        spellCheck={false}
+        className="w-full bg-gray-900 text-gray-100 font-mono text-xs rounded-xl p-4 resize-y focus:outline-none focus:ring-2 focus:ring-gray-400"
+      />
+      {error && (
+        <div className="flex items-start gap-2 mt-2 text-sm text-red-600">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+      {savedNote && (
+        <div className="flex items-center gap-2 mt-2 text-sm text-green-700">
+          <Check className="w-4 h-4 shrink-0" />
+          <span>Saved — a run was triggered</span>
+        </div>
+      )}
+      <div className="flex items-center gap-2 mt-3">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium ${
+            saving ? "opacity-60 pointer-events-none" : ""
+          }`}
+        >
+          {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+          <span>{saving ? "Saving..." : "Save"}</span>
+        </button>
+        <button
+          onClick={onClose}
+          className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 border border-gray-200 rounded-xl transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSaved }) => {
   const [runs, setRuns] = useState([]);
   const [loadingRuns, setLoadingRuns] = useState(true);
   const [runsError, setRunsError] = useState(null);
   const [selectedRunId, setSelectedRunId] = useState(null);
   const [triggering, setTriggering] = useState(false);
+  const [showWorkflowEditor, setShowWorkflowEditor] = useState(false);
   // Run ids whose SSE stream failed; those fall back to interval polling.
   const [sseFallbackIds, setSseFallbackIds] = useState([]);
+
+  // Completion toasts: track the last known status per run id and which run
+  // ids already fired a toast, so each run toasts exactly once no matter how
+  // its final update arrives (SSE, polling, refetch or manual-run response).
+  const runStatusesRef = useRef(new Map());
+  const toastedRunIdsRef = useRef(new Set());
+  const seededRunsRef = useRef(false);
+  const packageNameRef = useRef(packageName);
+  packageNameRef.current = packageName;
+
+  const noteRunStatuses = useCallback((updatedRuns, { seed = false } = {}) => {
+    updatedRuns.forEach((run) => {
+      if (!run || run._id == null) return;
+      const previous = runStatusesRef.current.get(run._id);
+      const finished = run.status === "success" || run.status === "failed";
+      if (seed) {
+        // Initial load: runs that are already finished must never toast.
+        if (finished) {
+          toastedRunIdsRef.current.add(run._id);
+        }
+      } else if (
+        finished &&
+        !toastedRunIdsRef.current.has(run._id) &&
+        (previous === undefined || isActiveRun(previous))
+      ) {
+        toastedRunIdsRef.current.add(run._id);
+        const name = packageNameRef.current || packageId;
+        if (run.status === "success") {
+          toast.success(`CI run #${run.number} for ${name} succeeded`);
+        } else {
+          toast.error(`CI run #${run.number} for ${name} failed`);
+        }
+      }
+      runStatusesRef.current.set(run._id, run.status);
+    });
+  }, [packageId]);
 
   const fetchRuns = useCallback(async () => {
     try {
@@ -687,7 +886,10 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
         throw new Error(`Runs request failed (${response.status})`);
       }
       const data = await response.json();
-      setRuns(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      noteRunStatuses(list, { seed: !seededRunsRef.current });
+      seededRunsRef.current = true;
+      setRuns(list);
       setRunsError(null);
     } catch (error) {
       console.error("Error fetching CI runs:", error);
@@ -695,7 +897,7 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
     } finally {
       setLoadingRuns(false);
     }
-  }, [packageId]);
+  }, [packageId, noteRunStatuses]);
 
   useEffect(() => {
     fetchRuns();
@@ -705,11 +907,13 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
     ? runs.find((run) => run._id === selectedRunId)
     : null;
 
-  // The opened run streams live over SSE while it is running (unless its
-  // stream already failed, in which case it stays on the polling fallback).
+  // The opened run streams live over SSE while it is active — queued,
+  // starting or running (unless its stream already failed, in which case it
+  // stays on the polling fallback). The stream stays open through the whole
+  // queued → starting → running lifecycle and closes on the final state.
   const streamingRunId =
     selectedRun &&
-    selectedRun.status === "running" &&
+    isActiveRun(selectedRun.status) &&
     !sseFallbackIds.includes(selectedRun._id)
       ? selectedRun._id
       : null;
@@ -726,10 +930,11 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
       try {
         const updated = JSON.parse(event.data);
         if (!updated || updated._id !== streamingRunId) return;
+        noteRunStatuses([updated]);
         setRuns((prev) =>
           prev.map((run) => (run._id === updated._id ? updated : run))
         );
-        if (updated.status !== "running") {
+        if (!isActiveRun(updated.status)) {
           source.close();
         }
       } catch (error) {
@@ -745,12 +950,12 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
     };
 
     return () => source.close();
-  }, [streamingRunId]);
+  }, [streamingRunId, noteRunStatuses]);
 
-  // Poll running runs not covered by the SSE stream (list entries that are
+  // Poll active runs not covered by the SSE stream (list entries that are
   // not open, plus the opened run when its stream failed).
   const runningKey = runs
-    .filter((run) => run.status === "running" && run._id !== streamingRunId)
+    .filter((run) => isActiveRun(run.status) && run._id !== streamingRunId)
     .map((run) => run._id)
     .join(",");
 
@@ -775,13 +980,14 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
           }
         })
       );
+      noteRunStatuses(updates.filter(Boolean));
       setRuns((prev) =>
         prev.map((run) => updates.find((update) => update && update._id === run._id) || run)
       );
     };
     const interval = setInterval(poll, CI_POLL_MS);
     return () => clearInterval(interval);
-  }, [runningKey]);
+  }, [runningKey, noteRunStatuses]);
 
   const handleRunWorkflow = async () => {
     if (triggering) return;
@@ -797,6 +1003,14 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
         throw new Error(`Run request failed (${response.status})`);
       }
       const run = await response.json();
+      if (run && run._id != null) {
+        if (isActiveRun(run.status)) {
+          toast.info(`CI run #${run.number} queued`);
+        }
+        // Covers the edge case where the run already finished by the time
+        // the manual-run response arrives (previous status unknown → toast).
+        noteRunStatuses([run]);
+      }
       setRuns((prev) => [run, ...prev.filter((existing) => existing._id !== run._id)]);
       setSelectedRunId(run._id);
     } catch (error) {
@@ -821,21 +1035,44 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
             {runs.length} {runs.length === 1 ? "run" : "runs"}
           </span>
         </div>
-        <button
-          onClick={handleRunWorkflow}
-          disabled={triggering}
-          className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium ${
-            triggering ? "opacity-60 pointer-events-none" : ""
-          }`}
-        >
-          {triggering ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Play className="w-4 h-4" />
-          )}
-          <span>{triggering ? "Starting..." : "Run workflow"}</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowWorkflowEditor((prev) => !prev)}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border rounded-xl transition-colors ${
+              showWorkflowEditor
+                ? "border-gray-300 bg-gray-100 text-gray-900"
+                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+            }`}
+            title="Configure the workflow"
+          >
+            <Settings2 className="w-4 h-4" />
+            <span>Workflow</span>
+          </button>
+          <button
+            onClick={handleRunWorkflow}
+            disabled={triggering}
+            className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium ${
+              triggering ? "opacity-60 pointer-events-none" : ""
+            }`}
+          >
+            {triggering ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Play className="w-4 h-4" />
+            )}
+            <span>{triggering ? "Starting..." : "Run workflow"}</span>
+          </button>
+        </div>
       </div>
+
+      {showWorkflowEditor && (
+        <WorkflowEditor
+          packageId={packageId}
+          files={files}
+          onSaved={onWorkflowSaved}
+          onClose={() => setShowWorkflowEditor(false)}
+        />
+      )}
 
       {runsError && (
         <div className="px-4 py-2.5 text-sm text-red-700 bg-red-50 border-b border-red-100">
@@ -869,7 +1106,7 @@ const ActionsPanel = ({ packageId, refreshKey }) => {
                   {time && <span className="text-xs text-gray-500">{time}</span>}
                 </div>
                 <span className="text-xs text-gray-500 shrink-0">
-                  {run.status === "running" ? "In progress" : duration || "—"}
+                  {isActiveRun(run.status) ? runStatusLabel(run) : duration || "—"}
                 </span>
               </button>
             );
@@ -989,6 +1226,13 @@ export const Package = () => {
       return updatedFiles.find((f) => f && f.name === prev.name) || prev;
     });
   }, []);
+
+  // Saving lattice-ci.json uploads a new file version; the backend then
+  // auto-triggers a push run, so refetch the package and refresh the runs.
+  const handleWorkflowSaved = useCallback(async () => {
+    await fetchPackage();
+    setCiRefreshKey((prev) => prev + 1);
+  }, [fetchPackage]);
 
   const handleUpload = async (event) => {
     const file = event.target.files && event.target.files[0];
@@ -1229,7 +1473,13 @@ export const Package = () => {
             </div>
 
             {activeTab === "actions" ? (
-              <ActionsPanel packageId={id} refreshKey={ciRefreshKey} />
+              <ActionsPanel
+                packageId={id}
+                packageName={packageData.name || id}
+                refreshKey={ciRefreshKey}
+                files={files}
+                onWorkflowSaved={handleWorkflowSaved}
+              />
             ) : selectedFile ? (
               <FileViewer
                 file={selectedFile}

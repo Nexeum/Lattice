@@ -14,7 +14,7 @@ import psutil
 import requests
 import time
 import numpy as np
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from bson.objectid import ObjectId
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from auth_shared import require_user, require_user_query, decode_token, cors_origins, MONGO_URL
@@ -149,9 +149,10 @@ async def get_container_ip(container_id: str, user=Depends(require_user)):
         return {'error': str(e)}
 
 @app.post('/exe/{container_id}/{command}')
-async def execute_command(container_id: str, command: str, user=Depends(require_user)):
+async def execute_command(container_id: str, command: str, host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
     try:
-        container = client.containers.get(container_id)
+        container = docker_client.containers.get(container_id)
         exec_id = container.exec_run(f"sh -c '{command}'", privileged=True)
         output = exec_id.output.decode("utf-8")
 
@@ -163,9 +164,10 @@ async def execute_command(container_id: str, command: str, user=Depends(require_
         return {'error': str(e)}
     
 @app.post('/node/{outer_container_id}/{inner_container_id}/{command}')
-async def execute_nested_command(outer_container_id: str, inner_container_id: str, command: str, user=Depends(require_user)):
+async def execute_nested_command(outer_container_id: str, inner_container_id: str, command: str, host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
     try:
-        outer_container = client.containers.get(outer_container_id)
+        outer_container = docker_client.containers.get(outer_container_id)
         nested_command = f"docker exec --privileged {inner_container_id} sh -c '{command}'"
         exec_id = outer_container.exec_run(nested_command, privileged=True)
         output = exec_id.output.decode("utf-8")
@@ -181,11 +183,12 @@ NODE_IMAGE = "docker:dind"
 NODE_DAEMON_TIMEOUT_SECONDS = 30
 
 @app.post("/containermain/{id}")
-async def create_container_main(id: str, user=Depends(require_user)):
-    containers = {container.name: container for container in client.containers.list(all=True)}
+async def create_container_main(id: str, host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
+    containers = {container.name: container for container in docker_client.containers.list(all=True)}
     if id in containers:
         return {"message": f"Container {id} already exists"}
-    container = client.containers.run(
+    container = docker_client.containers.run(
         NODE_IMAGE,
         detach=True,
         name=id,
@@ -202,8 +205,8 @@ async def create_container_main(id: str, user=Depends(require_user)):
     return {"message": f"Node {id} created; inner Docker daemon is still starting"}
 
 @app.get("/containers/{container_id}/ps")
-async def list_containers(container_id: str, user=Depends(require_user)):
-    container = client.containers.get(container_id)
+async def list_containers(container_id: str, host: str = None, user=Depends(require_user)):
+    container = get_client(host).containers.get(container_id)
     exec_id = container.exec_run("sh -c 'docker ps -a --format \"{{.ID}},{{.Names}},{{.Image}},{{.Status}}\"'", privileged=True)
     containers_info = exec_id.output.decode("utf-8").split("\n")
     containers_with_ip = []
@@ -216,15 +219,17 @@ async def list_containers(container_id: str, user=Depends(require_user)):
     return {"output": containers_with_ip}
 
 @app.get("/containers")
-async def get_containers(user=Depends(require_user)):
+async def get_containers(host: str = None, user=Depends(require_user)):
+    cli_env = docker_cli_env(host)
+    ensure_sampler_started()
     try:
-        output = subprocess.check_output(["docker", "ps", "-a", "--format", "{{json .}}"])
+        output = subprocess.check_output(["docker", "ps", "-a", "--format", "{{json .}}"], env=cli_env)
         containers = [json.loads(line) for line in output.splitlines()]
         containers = [c for c in containers if not c['Names'].startswith('k8s_')]
         modified_containers = []
 
         for container in containers:
-            inspect_output = subprocess.check_output(["docker", "inspect", container['ID']])
+            inspect_output = subprocess.check_output(["docker", "inspect", container['ID']], env=cli_env)
             inspect_data = json.loads(inspect_output)
 
             network_settings = inspect_data[0]['NetworkSettings']
@@ -246,9 +251,10 @@ async def get_containers(user=Depends(require_user)):
         raise HTTPException(status_code=500, detail={'error': 'Failed to get containers', 'message': str(e)})
 
 @app.get("/container/{id}/metrics")
-async def get_container_metrics(id: str, user=Depends(require_user)):
+async def get_container_metrics(id: str, host: str = None, user=Depends(require_user)):
+    cli_env = docker_cli_env(host)
     try:
-        output = subprocess.check_output(["docker", "stats", id, "--no-stream", "--format", "{{json .}}"])
+        output = subprocess.check_output(["docker", "stats", id, "--no-stream", "--format", "{{json .}}"], env=cli_env)
         metrics = json.loads(output)
         return metrics
     except Exception as e:
@@ -316,11 +322,11 @@ def run_install_script(container, package_name: str, files: list, docker_exec_pr
     return exec_id.output.decode("utf-8")
 
 @app.post("/container/{container_id}/install/{package_id}")
-async def install_package(container_id: str, package_id: str, user=Depends(require_user), authorization: str = Header(None)):
+async def install_package(container_id: str, package_id: str, host: str = None, user=Depends(require_user), authorization: str = Header(None)):
     try:
         package, files = fetch_package_or_404(package_id, authorization)
         package_name = package.get("name", package_id)
-        container = client.containers.get(container_id)
+        container = get_client(host).containers.get(container_id)
 
         container.exec_run(f"sh -c 'mkdir -p {PLUGINS_DIR}'", privileged=True)
         container.put_archive(PLUGINS_DIR, build_package_tar(package_name, files))
@@ -338,11 +344,11 @@ async def install_package(container_id: str, package_id: str, user=Depends(requi
         raise HTTPException(status_code=500, detail={'error': 'Failed to install package', 'message': str(e)})
 
 @app.post("/node/{outer_container_id}/{inner_container_id}/install/{package_id}")
-async def install_package_nested(outer_container_id: str, inner_container_id: str, package_id: str, user=Depends(require_user), authorization: str = Header(None)):
+async def install_package_nested(outer_container_id: str, inner_container_id: str, package_id: str, host: str = None, user=Depends(require_user), authorization: str = Header(None)):
     try:
         package, files = fetch_package_or_404(package_id, authorization)
         package_name = package.get("name", package_id)
-        outer = client.containers.get(outer_container_id)
+        outer = get_client(host).containers.get(outer_container_id)
 
         staging_dir = "/opt/lattice/.staging"
         outer.exec_run(f"sh -c 'mkdir -p {staging_dir}'", privileged=True)
@@ -385,6 +391,12 @@ ci_runs = ci_db['ci_runs']
 
 CI_IMAGE = "alpine:3.19"
 CI_STEP_TIMEOUT_SECONDS = 120
+CI_CONCURRENCY = int(os.environ.get("LATTICE_CI_CONCURRENCY", "2"))
+CI_ACTIVE_STATUSES = {"queued", "starting", "running"}
+CI_WORKER_IDLE_SLEEP_SECONDS = 1
+
+_ci_workers_lock = threading.Lock()
+_ci_workers_started = False
 
 def utc_now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -392,6 +404,7 @@ def utc_now_iso():
 def serialize_run(doc):
     doc = dict(doc)
     doc["_id"] = str(doc["_id"])
+    doc.pop("files", None)
     return doc
 
 def plan_ci_steps(files):
@@ -429,40 +442,70 @@ def plan_ci_steps(files):
         steps.append({"name": "Validate files", "run": "ls -la"})
     return image, steps
 
-def execute_ci_run(run_id, package_name, files, steps, image=CI_IMAGE):
-    workdir = f"/work/{package_name}"
+def create_ci_runner(run):
+    """Create the runner container for a claimed run. This is the slow part
+    (image pull) and happens while the run is in the "starting" state."""
+    runner = client.containers.run(
+        run.get("image", CI_IMAGE), "sleep 600", detach=True,
+        name=f"lattice-ci-{str(run['_id'])[-8:]}-{int(time.time())}",
+    )
+    runner.exec_run("sh -c 'mkdir -p /work'")
+    runner.put_archive("/work", build_package_tar(run["package_name"], run["files"]))
+    return runner
+
+def execute_ci_step(runner, run_id, workdir, index, step):
+    started = time.time()
+    ci_runs.update_one(
+        {"_id": run_id},
+        {"$set": {f"steps.{index}.status": "running",
+                  f"steps.{index}.started_at": utc_now_iso()}},
+    )
+    exec_result = runner.exec_run(
+        f"sh -c 'cd {workdir} && timeout {CI_STEP_TIMEOUT_SECONDS} sh -c \"{step['run']}\"'"
+    )
+    output = exec_result.output.decode("utf-8", errors="replace")
+    step_status = "success" if exec_result.exit_code == 0 else "failed"
+    ci_runs.update_one(
+        {"_id": run_id},
+        {"$set": {
+            f"steps.{index}.status": step_status,
+            f"steps.{index}.output": output[-20000:],
+            f"steps.{index}.exit_code": exec_result.exit_code,
+            f"steps.{index}.duration_seconds": round(time.time() - started, 2),
+        }},
+    )
+    return step_status
+
+def post_ci_webhook(run, status, finished_at):
+    """Best-effort notification at the end of a run. No-op unless
+    LATTICE_CI_WEBHOOK_URL is set; never raises."""
+    webhook_url = os.environ.get("LATTICE_CI_WEBHOOK_URL")
+    if not webhook_url:
+        return
+    try:
+        requests.post(webhook_url, json={
+            "package": run.get("package_name"),
+            "run": run.get("number"),
+            "status": status,
+            "trigger": run.get("trigger"),
+            "finished_at": finished_at,
+        }, timeout=5)
+    except Exception:
+        pass
+
+def execute_ci_run(run):
+    """Execute a claimed run (status already "starting"). Creates the runner
+    container, transitions to "running", executes steps, and finalizes."""
+    run_id = run["_id"]
+    steps = run.get("steps", [])
+    workdir = f"/work/{run['package_name']}"
     runner = None
     status = "success"
     try:
-        runner = client.containers.run(
-            image, "sleep 600", detach=True,
-            name=f"lattice-ci-{str(run_id)[-8:]}-{int(time.time())}",
-        )
-        runner.exec_run("sh -c 'mkdir -p /work'")
-        runner.put_archive("/work", build_package_tar(package_name, files))
-
+        runner = create_ci_runner(run)
+        ci_runs.update_one({"_id": run_id}, {"$set": {"status": "running"}})
         for index, step in enumerate(steps):
-            started = time.time()
-            ci_runs.update_one(
-                {"_id": run_id},
-                {"$set": {f"steps.{index}.status": "running",
-                          f"steps.{index}.started_at": utc_now_iso()}},
-            )
-            exec_result = runner.exec_run(
-                f"sh -c 'cd {workdir} && timeout {CI_STEP_TIMEOUT_SECONDS} sh -c \"{step['run']}\"'"
-            )
-            output = exec_result.output.decode("utf-8", errors="replace")
-            step_status = "success" if exec_result.exit_code == 0 else "failed"
-            ci_runs.update_one(
-                {"_id": run_id},
-                {"$set": {
-                    f"steps.{index}.status": step_status,
-                    f"steps.{index}.output": output[-20000:],
-                    f"steps.{index}.exit_code": exec_result.exit_code,
-                    f"steps.{index}.duration_seconds": round(time.time() - started, 2),
-                }},
-            )
-            if step_status == "failed":
+            if execute_ci_step(runner, run_id, workdir, index, step) == "failed":
                 status = "failed"
                 remaining = {
                     f"steps.{i}.status": "skipped" for i in range(index + 1, len(steps))
@@ -479,10 +522,81 @@ def execute_ci_run(run_id, package_name, files, steps, image=CI_IMAGE):
                 runner.remove(force=True)
             except Exception:
                 pass
+        finished_at = utc_now_iso()
         ci_runs.update_one(
             {"_id": run_id},
-            {"$set": {"status": status, "finished_at": utc_now_iso()}},
+            {"$set": {"status": status, "finished_at": finished_at}},
         )
+        post_ci_webhook(run, status, finished_at)
+
+def claim_next_ci_run():
+    """Atomically claim the oldest queued run, moving it to "starting"."""
+    return ci_runs.find_one_and_update(
+        {"status": "queued"},
+        {"$set": {"status": "starting", "started_at": utc_now_iso()}},
+        sort=[("created_at", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
+
+def ci_worker_loop():
+    while True:
+        try:
+            run = claim_next_ci_run()
+        except Exception:
+            run = None
+        if run is None:
+            time.sleep(CI_WORKER_IDLE_SLEEP_SECONDS)
+            continue
+        try:
+            execute_ci_run(run)
+        except Exception as e:
+            finished_at = utc_now_iso()
+            ci_runs.update_one(
+                {"_id": run["_id"]},
+                {"$set": {"status": "failed", "error": str(e),
+                          "finished_at": finished_at}},
+            )
+            post_ci_webhook(run, "failed", finished_at)
+
+def mark_interrupted_ci_runs():
+    """Fail runs left in-flight by a previous process (service restart)."""
+    ci_runs.update_many(
+        {"status": {"$in": ["starting", "running"]}},
+        {"$set": {"status": "failed",
+                  "error": "interrupted by service restart",
+                  "finished_at": utc_now_iso()}},
+    )
+
+def ensure_ci_workers_started():
+    """Lazily start the bounded worker pool on first trigger. Not started at
+    import time because this module is also imported by tooling."""
+    global _ci_workers_started
+    with _ci_workers_lock:
+        if _ci_workers_started:
+            return
+        mark_interrupted_ci_runs()
+        for index in range(CI_CONCURRENCY):
+            threading.Thread(
+                target=ci_worker_loop, name=f"lattice-ci-worker-{index}", daemon=True,
+            ).start()
+        _ci_workers_started = True
+
+def attach_queue_positions(docs):
+    """Serialize run docs, adding 1-based queue_position (ordered by
+    created_at across ALL packages) to queued runs. Computed at read time."""
+    serialized = []
+    positions = None
+    for doc in docs:
+        out = serialize_run(doc)
+        if doc.get("status") == "queued":
+            if positions is None:
+                queued = ci_runs.find({"status": "queued"}, {"_id": 1}).sort("created_at", 1)
+                positions = {q["_id"]: pos for pos, q in enumerate(queued, start=1)}
+            position = positions.get(doc["_id"])
+            if position is not None:
+                out["queue_position"] = position
+        serialized.append(out)
+    return serialized
 
 @app.post("/ci/{package_id}/run")
 async def trigger_ci_run(package_id: str, trigger: str = "manual", user=Depends(require_user), authorization: str = Header(None)):
@@ -495,11 +609,13 @@ async def trigger_ci_run(package_id: str, trigger: str = "manual", user=Depends(
         "package_id": package_id,
         "package_name": package_name,
         "number": (last["number"] + 1) if last else 1,
-        "status": "running",
+        "status": "queued",
         "trigger": trigger,
         "image": image,
         "created_at": utc_now_iso(),
+        "started_at": None,
         "finished_at": None,
+        "files": files,
         "steps": [
             {"name": s["name"], "run": s["run"], "status": "queued",
              "output": "", "exit_code": None, "duration_seconds": None}
@@ -507,17 +623,13 @@ async def trigger_ci_run(package_id: str, trigger: str = "manual", user=Depends(
         ],
     }
     run_id = ci_runs.insert_one(run_doc).inserted_id
-
-    thread = threading.Thread(
-        target=execute_ci_run, args=(run_id, package_name, files, steps, image), daemon=True
-    )
-    thread.start()
+    ensure_ci_workers_started()
     return serialize_run(ci_runs.find_one({"_id": run_id}))
 
 @app.get("/ci/{package_id}/runs")
 async def list_ci_runs(package_id: str, user=Depends(require_user)):
     docs = ci_runs.find({"package_id": package_id}).sort("number", -1).limit(30)
-    return [serialize_run(d) for d in docs]
+    return attach_queue_positions(list(docs))
 
 @app.get("/ci/runs/{run_id}")
 async def get_ci_run(run_id: str, user=Depends(require_user)):
@@ -527,7 +639,7 @@ async def get_ci_run(run_id: str, user=Depends(require_user)):
         raise HTTPException(status_code=400, detail="Invalid run id")
     if not doc:
         raise HTTPException(status_code=404, detail="Run not found")
-    return serialize_run(doc)
+    return attach_queue_positions([doc])[0]
 
 CI_STREAM_MAX_SECONDS = 600
 CI_STREAM_POLL_SECONDS = 0.5
@@ -552,7 +664,7 @@ async def stream_ci_run(run_id: str, user=Depends(require_user_query)):
             if payload != last_payload:
                 last_payload = payload
                 yield f"data: {payload}\n\n"
-            if doc.get("status") != "running":
+            if doc.get("status") not in CI_ACTIVE_STATUSES:
                 break
             await asyncio.sleep(CI_STREAM_POLL_SECONDS)
 
@@ -562,10 +674,213 @@ async def stream_ci_run(run_id: str, user=Depends(require_user_query)):
         headers={"Cache-Control": "no-cache"},
     )
 
-@app.post("/container/{container_id}/start")
-async def start_container(container_id: str, user=Depends(require_user)):
+# ---------------------------------------------------------------------------
+# Multi-host registry (Docker remotes)
+# ---------------------------------------------------------------------------
+
+docker_hosts = ci_db['docker_hosts']
+
+HOST_URL_PREFIXES = ("tcp://", "ssh://", "unix://")
+HOST_PROBE_TIMEOUT_SECONDS = 2
+HOST_CONNECT_TIMEOUT_SECONDS = 5
+HOST_CLIENT_TIMEOUT_SECONDS = 30
+
+_host_clients_lock = threading.Lock()
+_host_clients = {}        # url -> docker.DockerClient (long-lived, 30s timeout)
+_host_api_clients = {}    # url -> docker.APIClient (terminal exec sockets)
+_host_probe_clients = {}  # url -> docker.DockerClient (status pings, 2s timeout)
+
+def lookup_host_or_404(host: str):
+    doc = docker_hosts.find_one({"name": host})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Unknown host")
+    return doc
+
+def get_client(host: str = None):
+    """DockerClient for a `host` query param. None/""/"local" resolves to the
+    module-level client; anything else is looked up by name in docker_hosts
+    and connected lazily (cached per url)."""
+    if host in (None, "", "local"):
+        return client
+    url = lookup_host_or_404(host)["url"]
+    with _host_clients_lock:
+        if url not in _host_clients:
+            _host_clients[url] = docker.DockerClient(
+                base_url=url, timeout=HOST_CLIENT_TIMEOUT_SECONDS,
+            )
+        return _host_clients[url]
+
+def get_api_client(host: str = None):
+    """Low-level APIClient counterpart of get_client (interactive exec)."""
+    if host in (None, "", "local"):
+        return api_client
+    url = lookup_host_or_404(host)["url"]
+    with _host_clients_lock:
+        if url not in _host_api_clients:
+            _host_api_clients[url] = docker.APIClient(base_url=url)
+        return _host_api_clients[url]
+
+def docker_cli_env(host: str = None):
+    """Env for subprocess docker CLI calls: None for local (inherit), else a
+    copy of the environment with DOCKER_HOST pointing at the remote."""
+    if host in (None, "", "local"):
+        return None
+    return {**os.environ, "DOCKER_HOST": lookup_host_or_404(host)["url"]}
+
+def probe_host_status(url: str) -> str:
     try:
-        container = client.containers.get(container_id)
+        with _host_clients_lock:
+            probe = _host_probe_clients.get(url)
+        if probe is None:
+            probe = docker.DockerClient(base_url=url, timeout=HOST_PROBE_TIMEOUT_SECONDS)
+            with _host_clients_lock:
+                _host_probe_clients[url] = probe
+        probe.ping()
+        return "up"
+    except Exception:
+        return "down"
+
+def drop_cached_host_clients(url: str):
+    with _host_clients_lock:
+        for cache in (_host_clients, _host_api_clients, _host_probe_clients):
+            dropped = cache.pop(url, None)
+            if dropped is not None:
+                try:
+                    dropped.close()
+                except Exception:
+                    pass
+
+@app.get("/hosts")
+async def list_hosts(user=Depends(require_user)):
+    try:
+        client.ping()
+        local_status = "up"
+    except Exception:
+        local_status = "down"
+    hosts = [{"id": "local", "name": "local", "url": None, "status": local_status}]
+    for doc in docker_hosts.find():
+        hosts.append({
+            "id": str(doc["_id"]),
+            "name": doc.get("name", ""),
+            "url": doc.get("url", ""),
+            "status": probe_host_status(doc.get("url", "")),
+        })
+    return hosts
+
+@app.post("/hosts")
+async def add_host(body: dict, user=Depends(require_user)):
+    name = str(body.get("name") or "").strip()
+    url = str(body.get("url") or "").strip()
+    if not name or not url:
+        raise HTTPException(status_code=400, detail="name and url are required")
+    if name == "local":
+        raise HTTPException(status_code=400, detail='"local" is a reserved host name')
+    if not url.startswith(HOST_URL_PREFIXES):
+        raise HTTPException(status_code=400, detail="url must start with tcp://, ssh:// or unix://")
+    try:
+        docker.DockerClient(base_url=url, timeout=HOST_CONNECT_TIMEOUT_SECONDS).ping()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not connect: {e}")
+    inserted_id = docker_hosts.insert_one({"name": name, "url": url}).inserted_id
+    return {"id": str(inserted_id), "name": name, "url": url, "status": "up"}
+
+@app.delete("/hosts/{host_id}")
+async def delete_host(host_id: str, user=Depends(require_user)):
+    try:
+        object_id = ObjectId(host_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid host id")
+    doc = docker_hosts.find_one_and_delete({"_id": object_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Host not found")
+    if doc.get("url"):
+        drop_cached_host_clients(doc["url"])
+    return {"deleted": host_id}
+
+# ---------------------------------------------------------------------------
+# Metrics history sampler (local containers only)
+# ---------------------------------------------------------------------------
+
+metrics_samples = ci_db['metrics_samples']
+
+METRICS_SAMPLE_INTERVAL_SECONDS = 30
+METRICS_TTL_SECONDS = 172800  # 48h
+METRICS_HISTORY_MAX_MINUTES = 1440
+
+_sampler_lock = threading.Lock()
+_sampler_started = False
+
+def parse_percent(value):
+    """Docker stats formats percentages as "1.23%"."""
+    try:
+        return float(str(value).strip().rstrip("%"))
+    except (ValueError, TypeError):
+        return 0.0
+
+def sample_container_metrics():
+    """One docker stats pass over all running local containers."""
+    output = subprocess.check_output(
+        ["docker", "stats", "--no-stream", "--format", "{{json .}}"]
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    docs = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        stats = json.loads(line)
+        if stats.get("Name", "").startswith("k8s_"):
+            continue
+        docs.append({
+            "container_id": stats.get("ID", "")[:12],
+            "name": stats.get("Name", ""),
+            "cpu": parse_percent(stats.get("CPUPerc")),
+            "mem": parse_percent(stats.get("MemPerc")),
+            "ts": now.isoformat(),
+            "ts_date": now,
+        })
+    if docs:
+        metrics_samples.insert_many(docs)
+
+def metrics_sampler_loop():
+    while True:
+        try:
+            sample_container_metrics()
+        except Exception:
+            pass
+        time.sleep(METRICS_SAMPLE_INTERVAL_SECONDS)
+
+def ensure_sampler_started():
+    """Lazily start the single sampler daemon thread (and the TTL index that
+    expires samples after 48h). Safe to call on every request."""
+    global _sampler_started
+    with _sampler_lock:
+        if _sampler_started:
+            return
+        try:
+            metrics_samples.create_index("ts_date", expireAfterSeconds=METRICS_TTL_SECONDS)
+        except Exception:
+            pass
+        threading.Thread(
+            target=metrics_sampler_loop, name="lattice-metrics-sampler", daemon=True,
+        ).start()
+        _sampler_started = True
+
+@app.get("/containers/{container_id}/metrics/history")
+async def get_container_metrics_history(container_id: str, minutes: int = 60, user=Depends(require_user)):
+    ensure_sampler_started()
+    minutes = max(1, min(minutes, METRICS_HISTORY_MAX_MINUTES))
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)
+    cursor = metrics_samples.find(
+        {"container_id": container_id[:12], "ts_date": {"$gte": since}},
+        {"_id": 0, "ts": 1, "cpu": 1, "mem": 1},
+    ).sort("ts", 1)
+    return {"samples": list(cursor)}
+
+@app.post("/container/{container_id}/start")
+async def start_container(container_id: str, host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
+    try:
+        container = docker_client.containers.get(container_id)
         container.start()
         return {"message": f"Container {container_id} started"}
     except Exception as e:
@@ -583,19 +898,24 @@ async def get_system_health(user=Depends(require_user)):
         raise HTTPException(status_code=500, detail={'error': 'Failed to get system health', 'message': str(e)})
 
 @app.websocket("/ws/terminal/{container_id}")
-async def terminal_websocket(websocket: WebSocket, container_id: str, token: str = None, inner: str = None):
+async def terminal_websocket(websocket: WebSocket, container_id: str, token: str = None, inner: str = None, host: str = None):
     try:
         decode_token(token or "")
     except Exception:
         await websocket.close(code=4401)
+        return
+    try:
+        ws_api_client = get_api_client(host)
+    except Exception:
+        await websocket.close(code=4404)
         return
     await websocket.accept()
 
     sock = None
     try:
         cmd = ["docker", "exec", "-it", inner, "sh"] if inner else ["sh"]
-        exec_id = api_client.exec_create(container_id, cmd, tty=True, stdin=True)
-        sock = api_client.exec_start(exec_id, tty=True, socket=True)
+        exec_id = ws_api_client.exec_create(container_id, cmd, tty=True, stdin=True)
+        sock = ws_api_client.exec_start(exec_id, tty=True, socket=True)
         sock._sock.setblocking(True)
     except Exception:
         await websocket.close(code=1011)
@@ -626,7 +946,7 @@ async def terminal_websocket(websocket: WebSocket, container_id: str, token: str
                 try:
                     control = json.loads(message["text"])
                     if control.get("type") == "resize":
-                        api_client.exec_resize(
+                        ws_api_client.exec_resize(
                             exec_id, height=int(control["rows"]), width=int(control["cols"])
                         )
                 except Exception:
@@ -645,10 +965,11 @@ async def terminal_websocket(websocket: WebSocket, container_id: str, token: str
             pass
 
 @app.get("/topology")
-async def get_topology(user=Depends(require_user)):
+async def get_topology(host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
     try:
         networks = []
-        for network in client.networks.list():
+        for network in docker_client.networks.list():
             network.reload()
             attached = [
                 {

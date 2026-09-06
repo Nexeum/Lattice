@@ -15,7 +15,9 @@ import { Package } from "./components/Package";
 import { Node } from "./components/Node";
 import { Home } from "./components/Home";
 import { PublicNavbar } from "./components/PublicNavbar";
+import { Toasts } from "./components/Toasts";
 import ApiDocumentation from './components/Api';
+import { startTokenRefresh } from "./lib/api";
 
 
 import "./App.css";
@@ -210,9 +212,16 @@ const ProtectedRoute = ({ component: Component, authenticated, ...rest }) => (
 function App() {
   const [authenticated, setAuthenticated] = useAuthentication();
 
+  useEffect(() => {
+    if (!authenticated) return undefined;
+    const stopTokenRefresh = startTokenRefresh();
+    return stopTokenRefresh;
+  }, [authenticated]);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <Router>
+        <Toasts />
         {authenticated ? (
           <div className="flex flex-col">
             <NavbarRC />

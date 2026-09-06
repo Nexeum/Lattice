@@ -24,13 +24,14 @@ const targetLabel = (containerId, innerContainerId) =>
     ? `${shortId(innerContainerId)} (via ${shortId(containerId)})`
     : shortId(containerId);
 
-const buildWsUrl = (containerId, innerContainerId) => {
+const buildWsUrl = (containerId, innerContainerId, host) => {
   const params = new URLSearchParams({ token: getToken() });
   if (innerContainerId) params.set("inner", innerContainerId);
+  if (host && host !== "local") params.set("host", host);
   return `${WS_BASE}/ws/terminal/${encodeURIComponent(containerId)}?${params.toString()}`;
 };
 
-export const Cli = ({ containerId, innerContainerId }) => {
+export const Cli = ({ containerId, innerContainerId, host }) => {
   const wrapperRef = useRef(null);
   const termElRef = useRef(null);
   const termRef = useRef(null);
@@ -159,7 +160,7 @@ export const Cli = ({ containerId, innerContainerId }) => {
 
       let ws;
       try {
-        ws = new WebSocket(buildWsUrl(containerId, innerContainerId));
+        ws = new WebSocket(buildWsUrl(containerId, innerContainerId, host));
       } catch (error) {
         console.error("Terminal socket open failed:", error);
         term.write(ANSI.clearLine);
@@ -214,7 +215,7 @@ export const Cli = ({ containerId, innerContainerId }) => {
       connectRef.current = null;
       teardown();
     };
-  }, [containerId, innerContainerId]);
+  }, [containerId, innerContainerId, host]);
 
   return (
     <div
