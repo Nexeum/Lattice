@@ -39,25 +39,6 @@ main {
     min-height: calc(100vh - 4rem); /* Account for navbar height */
 }
 
-/* Watermark styling for Tars GPT */
-.card-with-watermark {
-    position: relative;
-}
-
-.card-with-watermark::after {
-    content: "Tars GPT";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 1;
-    font-size: 3em;
-    color: rgba(128, 128, 128, 0.1); /* More subtle watermark */
-    font-weight: bold;
-    pointer-events: none;
-    user-select: none;
-}
-
 /* Ensure sidebar has proper background */
 aside {
     background-color: #f9fafb;

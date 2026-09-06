@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Container, Menu, X, Code, LogOut, User, Search, Moon, Sun } from "lucide-react";
-import { authHeaders } from "../lib/api";
+import { Container, Menu, X, Code, LogOut, User, Search, Moon, Sun, Shield } from "lucide-react";
+import { authHeaders, getRole } from "../lib/api";
 import { getTheme, toggleTheme } from "../lib/theme";
 import { openPalette } from "./CommandPalette";
 
@@ -47,9 +47,13 @@ export const NavbarRC = () => {
 
   const displayName = userEmail ? userEmail.split("@")[0] : null;
 
+  // Compute the role once per render; the Admin entry only exists for admins.
+  const isAdmin = getRole() === "admin";
+
   const navLinks = [
     { to: "/", label: "Dashboard", icon: Container },
-    { to: "/nodesly", label: "Nodes", icon: Container }
+    { to: "/nodesly", label: "Nodes", icon: Container },
+    ...(isAdmin ? [{ to: "/admin", label: "Admin", icon: Shield }] : [])
   ];
 
   const handleToggleTheme = () => {
