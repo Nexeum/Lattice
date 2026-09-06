@@ -19,18 +19,31 @@ export const redirectIfUnauthorized = (response) => {
   return false;
 };
 
-// Decode the JWT payload and return its expiry as epoch millis, or null if
-// the token is missing/malformed.
-export const tokenExpiresAt = () => {
+// Decode the JWT payload (base64url-safe). Returns the payload object, or
+// null when the token is missing/malformed.
+export const getTokenPayload = () => {
   try {
     const token = getToken();
     if (!token) return null;
     const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
     const payload = JSON.parse(atob(base64));
-    return typeof payload.exp === "number" ? payload.exp * 1000 : null;
+    return payload && typeof payload === "object" ? payload : null;
   } catch {
     return null;
   }
+};
+
+// Role claim baked into the JWT; defaults to "user" for legacy tokens.
+export const getRole = () => {
+  const payload = getTokenPayload();
+  return payload?.role || "user";
+};
+
+// Decode the JWT payload and return its expiry as epoch millis, or null if
+// the token is missing/malformed.
+export const tokenExpiresAt = () => {
+  const payload = getTokenPayload();
+  return payload && typeof payload.exp === "number" ? payload.exp * 1000 : null;
 };
 
 const REFRESH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // check every 5 minutes

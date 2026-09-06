@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { useParams } from 'react-router-dom';
-import { Bar, Line } from 'react-chartjs-2';
+import { Line } from 'react-chartjs-2';
 import { Chart, registerables } from 'chart.js';
 import {
   Activity,
@@ -12,8 +12,6 @@ import {
   HardDrive,
   MemoryStick,
   Network,
-  X,
-  Zap,
 } from 'lucide-react';
 import { authHeaders, redirectIfUnauthorized } from '../lib/api';
 
@@ -23,7 +21,6 @@ const API_BASE = 'http://localhost:5001';
 const CPU_WINDOW = 8;
 const POLL_INTERVAL_MS = 5000;
 const MAX_METRIC_FAILURES = 3;
-const LOAD_TEST_KEYS = ['p50', 'p90', 'mean', 'max', 'min'];
 
 const GRID_COLOR = '#f3f4f6';
 const TICK_COLOR = '#9ca3af';
@@ -61,15 +58,6 @@ function parsePercentage(percentage) {
 
 function isRunningStatus(status) {
   return typeof status === 'string' && status.toLowerCase().startsWith('up');
-}
-
-function extractLoadTestResults(data) {
-  if (!data || typeof data !== 'object') return null;
-  const results = LOAD_TEST_KEYS.reduce((acc, key) => {
-    const value = parseFloat(data[key]);
-    return Number.isFinite(value) ? { ...acc, [key]: value } : acc;
-  }, {});
-  return Object.keys(results).length === LOAD_TEST_KEYS.length ? results : null;
 }
 
 const StatusBadge = ({ status }) => {
@@ -127,11 +115,6 @@ export const ContainerDetails = () => {
   const [timestamps, setTimestamps] = useState([]);
   const [metricFailures, setMetricFailures] = useState(0);
   const [initialLoading, setInitialLoading] = useState(true);
-
-  const [modalOpen, setModalOpen] = useState(false);
-  const [loadTestRunning, setLoadTestRunning] = useState(false);
-  const [loadTestResults, setLoadTestResults] = useState(null);
-  const [loadTestFailed, setLoadTestFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -198,33 +181,6 @@ export const ContainerDetails = () => {
     };
   }, [id]);
 
-  const startLoadTest = () => {
-    setLoadTestRunning(true);
-    setLoadTestResults(null);
-    setLoadTestFailed(false);
-
-    axios
-      .get(`${API_BASE}/container/${id}/overload`, {
-        timeout: 120000,
-        headers: { ...authHeaders() },
-      })
-      .then((response) => {
-        const results = extractLoadTestResults(response.data);
-        setLoadTestResults(results);
-        setLoadTestFailed(results === null);
-      })
-      .catch((error) => {
-        console.error('Load test failed', error);
-        if (redirectIfUnauthorized(error.response)) return;
-        setLoadTestResults(null);
-        setLoadTestFailed(true);
-      })
-      .finally(() => {
-        setLoadTestRunning(false);
-        setModalOpen(true);
-      });
-  };
-
   const cpuChartData = useMemo(
     () => ({
       labels: timestamps,
@@ -244,22 +200,6 @@ export const ContainerDetails = () => {
     }),
     [timestamps, cpuPercData]
   );
-
-  const loadTestChartData = useMemo(() => {
-    if (!loadTestResults) return null;
-    return {
-      labels: LOAD_TEST_KEYS,
-      datasets: [
-        {
-          label: 'Latency (s)',
-          data: LOAD_TEST_KEYS.map((key) => loadTestResults[key]),
-          backgroundColor: 'rgba(17, 24, 39, 0.8)',
-          borderRadius: 8,
-          maxBarThickness: 48,
-        },
-      ],
-    };
-  }, [loadTestResults]);
 
   const memPerc = metrics ? parsePercentage(metrics.MemPerc) : 0;
   const metricsUnavailable = metricFailures >= MAX_METRIC_FAILURES;
@@ -303,29 +243,7 @@ export const ContainerDetails = () => {
               </span>
             </div>
           </div>
-          <button
-            onClick={startLoadTest}
-            disabled={loadTestRunning}
-            className="flex-shrink-0 inline-flex items-center space-x-2 px-6 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium shadow-sm hover:shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {loadTestRunning ? (
-              <>
-                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span>Running load test…</span>
-              </>
-            ) : (
-              <>
-                <Zap className="w-4 h-4" />
-                <span>Start Load Test</span>
-              </>
-            )}
-          </button>
         </div>
-        {loadTestRunning && (
-          <p className="mt-4 text-sm text-gray-500">
-            Running load test… this can take up to a minute.
-          </p>
-        )}
       </div>
 
       {/* Metrics error */}
@@ -387,68 +305,6 @@ export const ContainerDetails = () => {
         <StatCard icon={Network} label="Network I/O" value={metrics?.NetIO} />
         <StatCard icon={HardDrive} label="Block I/O" value={metrics?.BlockIO} />
       </div>
-
-      {/* Load test modal */}
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black bg-opacity-40"
-            onClick={() => setModalOpen(false)}
-          />
-          <div className="relative bg-white rounded-3xl shadow-xl max-w-2xl w-full p-8">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-light text-gray-900">Load Test Results</h2>
-              <button
-                onClick={() => setModalOpen(false)}
-                className="p-2 rounded-full hover:bg-gray-100 transition-colors"
-                aria-label="Close"
-              >
-                <X className="w-5 h-5 text-gray-500" />
-              </button>
-            </div>
-
-            {loadTestFailed || !loadTestResults ? (
-              <div className="flex flex-col items-center text-center py-8">
-                <AlertTriangle className="w-10 h-10 text-gray-300 mb-4" />
-                <p className="text-gray-900 font-medium mb-1">No results available</p>
-                <p className="text-sm text-gray-500 max-w-sm">
-                  This container doesn't expose an HTTP endpoint to test.
-                </p>
-              </div>
-            ) : (
-              <>
-                <div className="h-64 mb-6">
-                  <Bar data={loadTestChartData} options={baseChartOptions} />
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                  {LOAD_TEST_KEYS.map((key) => (
-                    <div
-                      key={key}
-                      className="bg-gray-50 rounded-2xl p-3 text-center border border-gray-100"
-                    >
-                      <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">
-                        {key}
-                      </p>
-                      <p className="text-sm font-medium text-gray-900">
-                        {loadTestResults[key].toFixed(3)}s
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-
-            <div className="flex justify-end mt-8">
-              <button
-                onClick={() => setModalOpen(false)}
-                className="px-6 py-3 bg-black text-white rounded-full hover:bg-gray-800 transition-all duration-200 font-medium"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

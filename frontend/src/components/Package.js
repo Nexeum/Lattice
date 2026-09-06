@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useHistory } from "react-router-dom";
 import {
   Star,
@@ -28,7 +28,13 @@ import {
   History,
   FileArchive,
   Download,
-  Layers
+  Layers,
+  GitPullRequest,
+  PauseCircle,
+  BadgeCheck,
+  Users,
+  Plus,
+  Rocket
 } from "lucide-react";
 import { authHeaders, getToken, redirectIfUnauthorized } from "../lib/api";
 import { toast } from "../lib/toast";
@@ -593,6 +599,9 @@ const CiStatusIcon = ({ status, className = "w-4 h-4" }) => {
   if (status === "starting" || status === "running") {
     return <Loader2 className={`${className} text-amber-500 animate-spin shrink-0`} />;
   }
+  if (status === "awaiting_approval") {
+    return <PauseCircle className={`${className} text-amber-500 shrink-0`} />;
+  }
   if (status === "success") {
     return <CheckCircle2 className={`${className} text-green-600 shrink-0`} />;
   }
@@ -611,8 +620,9 @@ const TriggerBadge = ({ trigger }) => (
   </span>
 );
 
-const RunDetail = ({ run, onBack }) => {
+const RunDetail = ({ run, onBack, onRunUpdate }) => {
   const [expandedSteps, setExpandedSteps] = useState({});
+  const [decidingAction, setDecidingAction] = useState(null);
   const steps = Array.isArray(run.steps) ? run.steps : [];
   const artifacts = Array.isArray(run.artifacts) ? run.artifacts : [];
   const failedIndex = steps.findIndex((step) => step?.status === "failed");
@@ -625,6 +635,46 @@ const RunDetail = ({ run, onBack }) => {
 
   const toggleStep = (index) =>
     setExpandedSteps((prev) => ({ ...prev, [index]: !prev[index] }));
+
+  // Approve or reject a deployment that is waiting for a human decision.
+  // Approving actually performs the deploy server-side, so it can take a
+  // while — the button shows a "Deploying…" spinner until it resolves.
+  const handleDeployDecision = async (action) => {
+    if (decidingAction) return;
+    setDecidingAction(action);
+    try {
+      const response = await fetch(`${CI_BASE}/ci/runs/${run._id}/${action}`, {
+        method: "POST",
+        headers: { ...authHeaders() }
+      });
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        if (response.status === 403) {
+          toast.error("Only the owner or an admin can approve");
+          return;
+        }
+        throw new Error(`Deploy ${action} failed (${response.status})`);
+      }
+      const updated = await response.json();
+      if (updated && updated._id != null && typeof onRunUpdate === "function") {
+        onRunUpdate(updated);
+      }
+      if (action === "approve") {
+        toast.success(`Run #${run.number} approved`);
+      } else {
+        toast.info(`Deployment for run #${run.number} rejected`);
+      }
+    } catch (error) {
+      console.error("Error deciding deployment:", error);
+      toast.error(
+        action === "approve"
+          ? "Could not approve the deployment. Please try again."
+          : "Could not reject the deployment. Please try again."
+      );
+    } finally {
+      setDecidingAction(null);
+    }
+  };
 
   const created = formatCiTime(run.created_at);
   const finished = formatCiTime(run.finished_at);
@@ -646,6 +696,21 @@ const RunDetail = ({ run, onBack }) => {
             CI pipeline #{run.number}
           </span>
           <TriggerBadge trigger={run.trigger} />
+          {run.deploy && (run.deploy.workspace || run.deploy.environment) && (
+            <span className="hidden sm:inline-flex items-center gap-1 shrink-0">
+              {run.deploy.workspace && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-full text-[11px] font-medium font-mono">
+                  <Rocket className="w-3 h-3" />
+                  {run.deploy.workspace}
+                </span>
+              )}
+              {run.deploy.environment && (
+                <span className="inline-flex items-center px-2 py-0.5 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-full text-[11px] font-medium">
+                  {run.deploy.environment}
+                </span>
+              )}
+            </span>
+          )}
           {isActiveRun(run.status) && (
             <span
               className={`text-xs font-medium shrink-0 ${
@@ -653,6 +718,11 @@ const RunDetail = ({ run, onBack }) => {
               }`}
             >
               {runStatusLabel(run)}
+            </span>
+          )}
+          {run.status === "awaiting_approval" && (
+            <span className="text-xs font-medium text-amber-600 shrink-0">
+              Awaiting approval
             </span>
           )}
           {run.image && (
@@ -675,6 +745,65 @@ const RunDetail = ({ run, onBack }) => {
         <div className="flex items-start gap-2 px-4 py-2.5 text-sm text-red-700 bg-red-50 border-b border-red-100">
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{run.error}</span>
+        </div>
+      )}
+
+      {run.status === "awaiting_approval" && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3 bg-amber-50 border-b border-amber-200">
+          <div className="flex items-start gap-2.5 flex-1 min-w-0">
+            <PauseCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-amber-900">
+                This run wants to deploy to {run.deploy?.workspace || "a workspace"} (
+                {run.deploy?.environment || "unknown environment"})
+              </p>
+              <p className="text-xs text-amber-700 mt-0.5">
+                Approving starts the deployment immediately.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => handleDeployDecision("approve")}
+              disabled={decidingAction != null}
+              className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium ${
+                decidingAction != null ? "opacity-60 pointer-events-none" : ""
+              }`}
+            >
+              {decidingAction === "approve" && (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              )}
+              <span>{decidingAction === "approve" ? "Deploying…" : "Approve"}</span>
+            </button>
+            <button
+              onClick={() => handleDeployDecision("reject")}
+              disabled={decidingAction != null}
+              className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 border border-red-200 bg-white rounded-xl transition-colors ${
+                decidingAction != null ? "opacity-60 pointer-events-none" : ""
+              }`}
+            >
+              {decidingAction === "reject" && (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              )}
+              <span>{decidingAction === "reject" ? "Rejecting…" : "Reject"}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {run.deploy_result && (
+        <div
+          className={`flex items-start gap-2 px-4 py-2.5 text-sm border-b ${
+            run.deploy_result.ok
+              ? "text-green-700 bg-green-50 border-green-100"
+              : "text-red-700 bg-red-50 border-red-100"
+          }`}
+        >
+          <Rocket className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>
+            {run.deploy_result.ok ? "Deployed successfully" : "Deployment failed"}
+            {run.deploy_result.detail ? ` — ${run.deploy_result.detail}` : ""}
+          </span>
         </div>
       )}
 
@@ -853,6 +982,9 @@ const WorkflowEditor = ({ packageId, files, onSaved, onClose }) => {
       <p className="text-xs text-gray-500 mb-2">
         Files your steps write to artifacts/ are saved and downloadable from the run.
       </p>
+      <p className="text-xs text-gray-500 mb-2">
+        {'Optional "deploy" key — {"workspace": "lat-xxxx", "environment": "production"} — pauses the run for approval before deploying.'}
+      </p>
       <textarea
         value={text}
         onChange={handleChange}
@@ -901,8 +1033,19 @@ const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSav
   const [selectedRunId, setSelectedRunId] = useState(null);
   const [triggering, setTriggering] = useState(false);
   const [showWorkflowEditor, setShowWorkflowEditor] = useState(false);
+  const [showBadge, setShowBadge] = useState(false);
+  const [badgeCopied, setBadgeCopied] = useState(false);
+  const badgeCopyTimeoutRef = useRef(null);
   // Run ids whose SSE stream failed; those fall back to interval polling.
   const [sseFallbackIds, setSseFallbackIds] = useState([]);
+
+  useEffect(() => {
+    return () => {
+      if (badgeCopyTimeoutRef.current) {
+        clearTimeout(badgeCopyTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Completion toasts: track the last known status per run id and which run
   // ids already fired a toast, so each run toasts exactly once no matter how
@@ -1053,6 +1196,36 @@ const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSav
     return () => clearInterval(interval);
   }, [runningKey, noteRunStatuses]);
 
+  // The public CI badge for this plugin (served by the CI service, no auth).
+  const badgeUrl = `${CI_BASE}/ci/${packageId}/badge.svg`;
+  const badgeMarkdown = `![CI](${badgeUrl})`;
+
+  const handleCopyBadge = async () => {
+    try {
+      await navigator.clipboard.writeText(badgeMarkdown);
+      setBadgeCopied(true);
+      badgeCopyTimeoutRef.current = setTimeout(
+        () => setBadgeCopied(false),
+        COPY_FEEDBACK_MS
+      );
+    } catch (error) {
+      console.error("Error copying badge markdown:", error);
+    }
+  };
+
+  // Merge a single updated run (e.g. from a deploy approve/reject response)
+  // into the list, immutably, and let the toast bookkeeping see it.
+  const handleRunUpdate = useCallback(
+    (updated) => {
+      if (!updated || updated._id == null) return;
+      noteRunStatuses([updated]);
+      setRuns((prev) =>
+        prev.map((run) => (run._id === updated._id ? updated : run))
+      );
+    },
+    [noteRunStatuses]
+  );
+
   const handleRunWorkflow = async () => {
     if (triggering) return;
     setTriggering(true);
@@ -1086,7 +1259,13 @@ const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSav
   };
 
   if (selectedRun) {
-    return <RunDetail run={selectedRun} onBack={() => setSelectedRunId(null)} />;
+    return (
+      <RunDetail
+        run={selectedRun}
+        onBack={() => setSelectedRunId(null)}
+        onRunUpdate={handleRunUpdate}
+      />
+    );
   }
 
   return (
@@ -1100,6 +1279,18 @@ const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSav
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowBadge((prev) => !prev)}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border rounded-xl transition-colors ${
+              showBadge
+                ? "border-gray-300 bg-gray-100 text-gray-900"
+                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+            }`}
+            title="CI status badge"
+          >
+            <BadgeCheck className="w-4 h-4" />
+            <span>Badge</span>
+          </button>
           <button
             onClick={() => setShowWorkflowEditor((prev) => !prev)}
             className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border rounded-xl transition-colors ${
@@ -1128,6 +1319,41 @@ const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSav
           </button>
         </div>
       </div>
+
+      {showBadge && (
+        <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
+          <div className="flex items-center gap-2 mb-2">
+            <BadgeCheck className="w-4 h-4 text-gray-500" />
+            <span className="text-sm font-semibold text-gray-900">CI badge</span>
+            <img src={badgeUrl} alt="CI status badge" className="h-5" />
+          </div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-200 rounded-lg text-xs font-mono text-gray-800 overflow-x-auto whitespace-nowrap">
+              {badgeMarkdown}
+            </code>
+            <button
+              onClick={handleCopyBadge}
+              className="inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 bg-white border border-gray-200 rounded-lg transition-colors shrink-0"
+              title="Copy badge markdown"
+            >
+              {badgeCopied ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-green-600" />
+                  <span className="text-green-600">Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Paste this into your README — the badge is public, no token needed.
+          </p>
+        </div>
+      )}
 
       {showWorkflowEditor && (
         <WorkflowEditor
@@ -1169,8 +1395,18 @@ const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSav
                   </div>
                   {time && <span className="text-xs text-gray-500">{time}</span>}
                 </div>
-                <span className="text-xs text-gray-500 shrink-0">
-                  {isActiveRun(run.status) ? runStatusLabel(run) : duration || "—"}
+                <span
+                  className={`text-xs shrink-0 ${
+                    run.status === "awaiting_approval"
+                      ? "text-amber-600 font-medium"
+                      : "text-gray-500"
+                  }`}
+                >
+                  {isActiveRun(run.status)
+                    ? runStatusLabel(run)
+                    : run.status === "awaiting_approval"
+                    ? "Awaiting approval"
+                    : duration || "—"}
                 </span>
               </button>
             );
@@ -1185,6 +1421,783 @@ const ActionsPanel = ({ packageId, packageName, refreshKey, files, onWorkflowSav
           </p>
         </div>
       )}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Changesets ("plugin PRs"): review queue with per-file line diffs.   */
+/* ------------------------------------------------------------------ */
+
+// Refuse to run the O(n*m) LCS on very large files; fall back to showing
+// the old and new contents side by side instead.
+const DIFF_MAX_CELLS = 250000;
+
+// Line-based diff via longest-common-subsequence. Returns a list of
+// { type: "same" | "add" | "del", text } ops, or null when the inputs are
+// too large to diff comfortably in the browser.
+const diffLines = (oldText, newText) => {
+  const oldLines = String(oldText).split("\n");
+  const newLines = String(newText).split("\n");
+  const rows = oldLines.length;
+  const cols = newLines.length;
+  if (rows * cols > DIFF_MAX_CELLS) return null;
+
+  const lcs = Array.from({ length: rows + 1 }, () => new Array(cols + 1).fill(0));
+  for (let i = rows - 1; i >= 0; i -= 1) {
+    for (let j = cols - 1; j >= 0; j -= 1) {
+      lcs[i][j] =
+        oldLines[i] === newLines[j]
+          ? lcs[i + 1][j + 1] + 1
+          : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < rows && j < cols) {
+    if (oldLines[i] === newLines[j]) {
+      ops.push({ type: "same", text: oldLines[i] });
+      i += 1;
+      j += 1;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      ops.push({ type: "del", text: oldLines[i] });
+      i += 1;
+    } else {
+      ops.push({ type: "add", text: newLines[j] });
+      j += 1;
+    }
+  }
+  while (i < rows) {
+    ops.push({ type: "del", text: oldLines[i] });
+    i += 1;
+  }
+  while (j < cols) {
+    ops.push({ type: "add", text: newLines[j] });
+    j += 1;
+  }
+  return ops;
+};
+
+const DIFF_LINE_STYLES = {
+  add: "bg-green-50 text-green-800",
+  del: "bg-red-50 text-red-700",
+  same: "text-gray-500"
+};
+const DIFF_LINE_PREFIXES = { add: "+", del: "-", same: " " };
+
+const DiffLineRows = ({ ops }) => (
+  <pre className="text-xs font-mono leading-5 py-2 min-w-max">
+    {ops.map((op, index) => (
+      <div key={index} className={`px-3 ${DIFF_LINE_STYLES[op.type]}`}>
+        <span className="inline-block w-4 select-none">
+          {DIFF_LINE_PREFIXES[op.type]}
+        </span>
+        <span className="whitespace-pre">{op.text || " "}</span>
+      </div>
+    ))}
+  </pre>
+);
+
+const FileDiff = ({ name, oldContent, newContent }) => {
+  const isNewFile = oldContent == null;
+  const proposed = newContent == null ? "" : String(newContent);
+  const unchanged = !isNewFile && String(oldContent) === proposed;
+
+  const ops = useMemo(() => {
+    if (unchanged) return [];
+    if (isNewFile) {
+      return proposed.split("\n").map((text) => ({ type: "add", text }));
+    }
+    return diffLines(oldContent, proposed);
+  }, [isNewFile, unchanged, oldContent, proposed]);
+
+  return (
+    <div className="border border-gray-200 rounded-xl overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200">
+        <FileText className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+        <span className="text-xs font-semibold text-gray-900 font-mono truncate">
+          {name}
+        </span>
+        {isNewFile && (
+          <span className="inline-flex items-center px-2 py-0.5 bg-green-50 border border-green-200 text-green-700 rounded-full text-[10px] font-medium shrink-0">
+            new file
+          </span>
+        )}
+      </div>
+      {unchanged ? (
+        <div className="px-3 py-3 text-xs text-gray-500">
+          No changes to this file.
+        </div>
+      ) : ops ? (
+        <div className="overflow-x-auto">
+          <DiffLineRows ops={ops} />
+        </div>
+      ) : (
+        // File too large for a line diff: old block and new block side by
+        // side on large screens, stacked on small ones.
+        <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-200">
+          <div className="overflow-x-auto">
+            <div className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-red-600">
+              Current
+            </div>
+            <pre className="text-xs font-mono leading-5 px-3 py-2 text-gray-700 min-w-max">
+              {String(oldContent)}
+            </pre>
+          </div>
+          <div className="overflow-x-auto">
+            <div className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-green-700">
+              Proposed
+            </div>
+            <pre className="text-xs font-mono leading-5 px-3 py-2 text-gray-700 min-w-max">
+              {proposed}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ChangesetStatusDot = ({ status }) => {
+  const color =
+    status === "pending"
+      ? "bg-amber-400"
+      : status === "approved"
+      ? "bg-green-500"
+      : "bg-gray-300";
+  return (
+    <span
+      className={`inline-block w-2.5 h-2.5 rounded-full shrink-0 ${color}`}
+      title={status}
+    />
+  );
+};
+
+const ChangesetsPanel = ({
+  packageId,
+  changesets,
+  loading,
+  error,
+  onRefresh,
+  packageFiles,
+  onApproved
+}) => {
+  const [selected, setSelected] = useState(null);
+  const [openingId, setOpeningId] = useState(null);
+  const [detailError, setDetailError] = useState(null);
+  const [decidingAction, setDecidingAction] = useState(null);
+
+  useEffect(() => {
+    onRefresh();
+  }, [onRefresh]);
+
+  const openChangeset = async (entry) => {
+    if (openingId) return;
+    setOpeningId(entry._id);
+    setDetailError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE}/packages/${packageId}/changesets/${entry._id}`,
+        { headers: { ...authHeaders() } }
+      );
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        throw new Error(`Changeset request failed (${response.status})`);
+      }
+      const data = await response.json();
+      setSelected(data);
+    } catch (fetchError) {
+      console.error("Error fetching changeset:", fetchError);
+      setDetailError("Could not load that changeset. Please try again.");
+    } finally {
+      setOpeningId(null);
+    }
+  };
+
+  const handleDecision = async (action) => {
+    if (!selected || decidingAction) return;
+    setDecidingAction(action);
+    try {
+      const response = await fetch(
+        `${API_BASE}/packages/${packageId}/changesets/${selected._id}/${action}`,
+        { method: "POST", headers: { ...authHeaders() } }
+      );
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        if (response.status === 409) {
+          toast.error("This changeset is no longer pending.");
+          setSelected(null);
+          onRefresh();
+          return;
+        }
+        if (response.status === 403) {
+          toast.error(`You are not allowed to ${action} this changeset.`);
+          return;
+        }
+        throw new Error(`Changeset ${action} failed (${response.status})`);
+      }
+      if (action === "approve") {
+        toast.success("Changeset approved — a CI run was triggered");
+        onApproved();
+      } else {
+        toast.info("Changeset rejected");
+        onRefresh();
+      }
+      setSelected(null);
+    } catch (decisionError) {
+      console.error("Error updating changeset:", decisionError);
+      toast.error(`Could not ${action} the changeset. Please try again.`);
+    } finally {
+      setDecidingAction(null);
+    }
+  };
+
+  if (selected) {
+    const changedFiles = Array.isArray(selected.files) ? selected.files : [];
+    const created = formatCiTime(selected.created_at);
+    const isPending = selected.status === "pending";
+    return (
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3 bg-gray-50 border-b border-gray-200">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              onClick={() => setSelected(null)}
+              className="p-1 text-gray-500 hover:text-gray-900 transition-colors shrink-0"
+              title="Back to changes"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <ChangesetStatusDot status={selected.status} />
+            <span className="text-sm font-semibold text-gray-900 truncate">
+              {selected.author_email || selected.author || "Unknown author"}
+            </span>
+            {created && (
+              <span className="text-xs text-gray-500 shrink-0">{created}</span>
+            )}
+          </div>
+          {isPending && (
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => handleDecision("approve")}
+                disabled={decidingAction != null}
+                className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium ${
+                  decidingAction != null ? "opacity-60 pointer-events-none" : ""
+                }`}
+              >
+                {decidingAction === "approve" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Check className="w-4 h-4" />
+                )}
+                <span>
+                  {decidingAction === "approve" ? "Approving..." : "Approve"}
+                </span>
+              </button>
+              <button
+                onClick={() => handleDecision("reject")}
+                disabled={decidingAction != null}
+                className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 border border-red-200 bg-white rounded-xl transition-colors ${
+                  decidingAction != null ? "opacity-60 pointer-events-none" : ""
+                }`}
+              >
+                {decidingAction === "reject" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <X className="w-4 h-4" />
+                )}
+                <span>
+                  {decidingAction === "reject" ? "Rejecting..." : "Reject"}
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="p-4 space-y-4">
+          {changedFiles.length > 0 ? (
+            changedFiles.map((file) => {
+              const current = (Array.isArray(packageFiles) ? packageFiles : []).find(
+                (candidate) => candidate && candidate.name === file.name
+              );
+              return (
+                <FileDiff
+                  key={file.name}
+                  name={file.name}
+                  oldContent={current ? current.content : null}
+                  newContent={file.content}
+                />
+              );
+            })
+          ) : (
+            <p className="text-sm text-gray-500">This changeset has no files.</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-3 bg-gray-50 border-b border-gray-200">
+        <GitPullRequest className="w-4 h-4 text-gray-500" />
+        <span className="text-sm font-semibold text-gray-900">Proposed changes</span>
+        <span className="text-xs text-gray-500">
+          {changesets.length} {changesets.length === 1 ? "changeset" : "changesets"}
+        </span>
+      </div>
+
+      {(error || detailError) && (
+        <div className="px-4 py-2.5 text-sm text-red-700 bg-red-50 border-b border-red-100">
+          {error || detailError}
+        </div>
+      )}
+
+      {loading && changesets.length === 0 ? (
+        <div className="flex items-center justify-center py-14">
+          <div className="w-6 h-6 border-2 border-gray-200 border-t-black rounded-full animate-spin"></div>
+        </div>
+      ) : changesets.length > 0 ? (
+        <div className="divide-y divide-gray-100">
+          {changesets.map((entry) => {
+            const isPending = entry.status === "pending";
+            const fileNames = Array.isArray(entry.files) ? entry.files : [];
+            const created = formatCiTime(entry.created_at);
+            const row = (
+              <>
+                <ChangesetStatusDot status={entry.status} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-gray-900 truncate">
+                      {entry.author_email || entry.author || "Unknown author"}
+                    </span>
+                    {fileNames.map((name) => (
+                      <span
+                        key={name}
+                        className="inline-flex items-center px-2 py-0.5 bg-gray-50 border border-gray-200 text-gray-600 rounded-full text-[11px] font-mono"
+                      >
+                        {name}
+                      </span>
+                    ))}
+                  </div>
+                  <span className="text-xs text-gray-500">
+                    {[entry.status, created].filter(Boolean).join(" · ")}
+                  </span>
+                </div>
+                {openingId === entry._id && (
+                  <Loader2 className="w-4 h-4 animate-spin text-gray-400 shrink-0" />
+                )}
+              </>
+            );
+            return isPending ? (
+              <button
+                key={entry._id}
+                onClick={() => openChangeset(entry)}
+                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
+              >
+                {row}
+              </button>
+            ) : (
+              <div
+                key={entry._id}
+                className="flex items-center gap-3 px-4 py-3 opacity-70"
+              >
+                {row}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-center py-14 px-4">
+          <GitPullRequest className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+          <h4 className="text-base font-medium text-gray-900 mb-1">
+            No proposed changes
+          </h4>
+          <p className="text-sm text-gray-600">
+            Contributions from non-writers appear here for review.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Releases: sidebar card listing releases with download + create.     */
+/* ------------------------------------------------------------------ */
+
+const ReleasesCard = ({ packageId }) => {
+  const [releases, setReleases] = useState([]);
+  const [loadError, setLoadError] = useState(null);
+  const [showModal, setShowModal] = useState(false);
+  const [version, setVersion] = useState("");
+  const [notes, setNotes] = useState("");
+  const [formError, setFormError] = useState(null);
+  const [creating, setCreating] = useState(false);
+
+  const fetchReleases = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/packages/${packageId}/releases`, {
+        headers: { ...authHeaders() }
+      });
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        throw new Error(`Releases request failed (${response.status})`);
+      }
+      const data = await response.json();
+      const list = Array.isArray(data) ? data : [];
+      setReleases(
+        [...list].sort(
+          (a, b) => new Date(b?.created_at || 0) - new Date(a?.created_at || 0)
+        )
+      );
+      setLoadError(null);
+    } catch (error) {
+      console.error("Error fetching releases:", error);
+      setLoadError("Could not load releases.");
+    }
+  }, [packageId]);
+
+  useEffect(() => {
+    fetchReleases();
+  }, [fetchReleases]);
+
+  const closeModal = () => {
+    setShowModal(false);
+    setVersion("");
+    setNotes("");
+    setFormError(null);
+  };
+
+  const handleCreate = async () => {
+    if (creating) return;
+    const trimmedVersion = version.trim();
+    if (!trimmedVersion) {
+      setFormError("Version is required.");
+      return;
+    }
+    setCreating(true);
+    setFormError(null);
+    try {
+      const response = await fetch(`${API_BASE}/packages/${packageId}/releases`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ version: trimmedVersion, notes })
+      });
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        if (response.status === 403) {
+          toast.error("Only writers can create releases");
+          return;
+        }
+        throw new Error(`Release create failed (${response.status})`);
+      }
+      toast.success(`Release ${trimmedVersion} created`);
+      closeModal();
+      fetchReleases();
+    } catch (error) {
+      console.error("Error creating release:", error);
+      toast.error("Could not create the release. Please try again.");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const releaseDownloadUrl = (releaseId) =>
+    `${API_BASE}/packages/${packageId}/releases/${releaseId}/download?token=${encodeURIComponent(
+      getToken() || ""
+    )}`;
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-gray-900">Releases</h3>
+        <button
+          onClick={() => setShowModal(true)}
+          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          <span>New release</span>
+        </button>
+      </div>
+
+      {loadError ? (
+        <p className="text-sm text-red-600">{loadError}</p>
+      ) : releases.length > 0 ? (
+        <div className="space-y-3">
+          {releases.map((release) => {
+            const releaseId = release?._id ?? release?.id;
+            const created = formatCiTime(release?.created_at);
+            const fileCount = Array.isArray(release?.files)
+              ? release.files.length
+              : 0;
+            return (
+              <div
+                key={releaseId || release?.version}
+                className="flex items-start gap-2"
+              >
+                <Tag className="w-4 h-4 text-gray-400 mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-gray-900 truncate">
+                      {release?.version}
+                    </span>
+                    {releaseId != null && (
+                      <a
+                        href={releaseDownloadUrl(releaseId)}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800 shrink-0"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>Download</span>
+                      </a>
+                    )}
+                  </div>
+                  {release?.notes && (
+                    <p className="text-xs text-gray-600 leading-relaxed">
+                      {release.notes}
+                    </p>
+                  )}
+                  <span className="text-[11px] text-gray-400">
+                    {[
+                      created,
+                      fileCount
+                        ? `${fileCount} ${fileCount === 1 ? "file" : "files"}`
+                        : null
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="text-sm text-gray-400 italic">No releases yet.</p>
+      )}
+
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-semibold text-gray-900">New release</h3>
+              <button
+                onClick={closeModal}
+                className="p-1 text-gray-500 hover:text-gray-900 transition-colors"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Version
+            </label>
+            <input
+              type="text"
+              value={version}
+              onChange={(event) => {
+                setVersion(event.target.value);
+                setFormError(null);
+              }}
+              placeholder="1.0.0"
+              className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-400 mb-3"
+            />
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Notes
+            </label>
+            <textarea
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+              rows={4}
+              placeholder="What changed in this release?"
+              className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm resize-y focus:outline-none focus:ring-2 focus:ring-gray-400"
+            />
+            {formError && <p className="text-sm text-red-600 mt-2">{formError}</p>}
+            <div className="flex items-center justify-end gap-2 mt-4">
+              <button
+                onClick={closeModal}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 border border-gray-200 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreate}
+                disabled={creating}
+                className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium ${
+                  creating ? "opacity-60 pointer-events-none" : ""
+                }`}
+              >
+                {creating && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{creating ? "Creating..." : "Create release"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Collaborators: owner-only sidebar card (hidden on 403).             */
+/* ------------------------------------------------------------------ */
+
+const CollaboratorsCard = ({ packageId }) => {
+  const [collaborators, setCollaborators] = useState(null);
+  const [visible, setVisible] = useState(false);
+  const [email, setEmail] = useState("");
+  const [addError, setAddError] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [removingId, setRemovingId] = useState(null);
+
+  const fetchCollaborators = useCallback(async () => {
+    try {
+      const response = await fetch(
+        `${API_BASE}/packages/${packageId}/collaborators`,
+        { headers: { ...authHeaders() } }
+      );
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        // Non-owners get a 403 — hide the block silently (same for any
+        // other load failure; this is an owner-only convenience).
+        setVisible(false);
+        return;
+      }
+      const data = await response.json();
+      setCollaborators(Array.isArray(data) ? data : []);
+      setVisible(true);
+    } catch (error) {
+      console.error("Error fetching collaborators:", error);
+      setVisible(false);
+    }
+  }, [packageId]);
+
+  useEffect(() => {
+    fetchCollaborators();
+  }, [fetchCollaborators]);
+
+  const handleAdd = async () => {
+    if (adding) return;
+    const trimmed = email.trim();
+    if (!trimmed) {
+      setAddError("Enter an email address.");
+      return;
+    }
+    setAdding(true);
+    setAddError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE}/packages/${packageId}/collaborators`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ email: trimmed })
+        }
+      );
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        if (response.status === 404) {
+          setAddError("No user found with that email.");
+          return;
+        }
+        throw new Error(`Add collaborator failed (${response.status})`);
+      }
+      toast.success(`Added ${trimmed} as a collaborator`);
+      setEmail("");
+      fetchCollaborators();
+    } catch (error) {
+      console.error("Error adding collaborator:", error);
+      toast.error("Could not add the collaborator. Please try again.");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleRemove = async (collaborator) => {
+    if (removingId != null) return;
+    setRemovingId(collaborator.id);
+    try {
+      const response = await fetch(
+        `${API_BASE}/packages/${packageId}/collaborators/${collaborator.id}`,
+        { method: "DELETE", headers: { ...authHeaders() } }
+      );
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        throw new Error(`Remove collaborator failed (${response.status})`);
+      }
+      toast.success(`Removed ${collaborator.email}`);
+      fetchCollaborators();
+    } catch (error) {
+      console.error("Error removing collaborator:", error);
+      toast.error("Could not remove the collaborator. Please try again.");
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  if (!visible || collaborators == null) return null;
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
+      <div className="flex items-center gap-2 mb-3">
+        <Users className="w-4 h-4 text-gray-500" />
+        <h3 className="text-sm font-semibold text-gray-900">Collaborators</h3>
+      </div>
+
+      {collaborators.length > 0 ? (
+        <div className="space-y-2 mb-3">
+          {collaborators.map((collaborator) => (
+            <div key={collaborator.id} className="flex items-center gap-2">
+              <span className="text-sm text-gray-700 truncate flex-1">
+                {collaborator.email}
+              </span>
+              <button
+                onClick={() => handleRemove(collaborator)}
+                disabled={removingId != null}
+                title={`Remove ${collaborator.email}`}
+                className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+              >
+                {removingId === collaborator.id ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <X className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-gray-400 italic mb-3">No collaborators yet.</p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          type="email"
+          value={email}
+          onChange={(event) => {
+            setEmail(event.target.value);
+            setAddError(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") handleAdd();
+          }}
+          placeholder="user@example.com"
+          className="flex-1 min-w-0 px-3 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-400"
+        />
+        <button
+          onClick={handleAdd}
+          disabled={adding}
+          className="inline-flex items-center gap-1 px-3 py-1.5 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors text-sm font-medium disabled:opacity-60"
+        >
+          {adding ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Plus className="w-3.5 h-3.5" />
+          )}
+          <span>Add</span>
+        </button>
+      </div>
+      {addError && <p className="text-sm text-red-600 mt-2">{addError}</p>}
     </div>
   );
 };
@@ -1211,6 +2224,9 @@ export const Package = () => {
   const [starError, setStarError] = useState(null);
   const [activeTab, setActiveTab] = useState("code");
   const [ciRefreshKey, setCiRefreshKey] = useState(0);
+  const [changesets, setChangesets] = useState([]);
+  const [changesetsLoading, setChangesetsLoading] = useState(false);
+  const [changesetsError, setChangesetsError] = useState(null);
 
   const fetchPackage = useCallback(async () => {
     try {
@@ -1245,6 +2261,41 @@ export const Package = () => {
       cancelled = true;
     };
   }, [fetchPackage]);
+
+  // Proposed changes ("plugin PRs"). Fetched on page load so the Changes tab
+  // can show its pending-count badge, and refreshed on tab mount / actions.
+  const fetchChangesets = useCallback(async () => {
+    setChangesetsLoading(true);
+    setChangesetsError(null);
+    try {
+      const response = await fetch(`${API_BASE}/packages/${id}/changesets`, {
+        headers: { ...authHeaders() }
+      });
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        throw new Error(`Changesets request failed (${response.status})`);
+      }
+      const data = await response.json();
+      setChangesets(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Error fetching changesets:", error);
+      setChangesetsError("Could not load proposed changes.");
+    } finally {
+      setChangesetsLoading(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    fetchChangesets();
+  }, [fetchChangesets]);
+
+  // Approving a changeset applies its files and triggers a CI run
+  // server-side, so refresh the package, the changesets and the runs list.
+  const handleChangesetApproved = useCallback(async () => {
+    await fetchPackage();
+    await fetchChangesets();
+    setCiRefreshKey((prev) => prev + 1);
+  }, [fetchPackage, fetchChangesets]);
 
   const handleStar = async () => {
     if (starred || starring || !packageData) return;
@@ -1316,6 +2367,13 @@ export const Package = () => {
       if (!response.ok) {
         if (redirectIfUnauthorized(response)) return;
         throw new Error(`Upload failed (${response.status})`);
+      }
+      // Non-writers get a 202: the upload became a pending changeset instead
+      // of landing directly, so there is no new file and no CI run to show.
+      if (response.status === 202) {
+        toast.info("Contribution submitted for review");
+        fetchChangesets();
+        return;
       }
       await fetchPackage();
       setUploadSuccess(`"${file.name}" contributed successfully.`);
@@ -1392,6 +2450,9 @@ export const Package = () => {
   const tags = Array.isArray(packageData.tags) ? packageData.tags : [];
   const files = Array.isArray(packageData.files) ? packageData.files : [];
   const starCount = typeof packageData.stars === "number" ? packageData.stars : 0;
+  const pendingChangesetCount = changesets.filter(
+    (entry) => entry && entry.status === "pending"
+  ).length;
 
   const readmeFile = files.find(
     (file) =>
@@ -1532,6 +2593,28 @@ export const Package = () => {
                 <span>Code</span>
               </button>
               <button
+                onClick={() => setActiveTab("changes")}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  activeTab === "changes"
+                    ? "bg-black text-white"
+                    : "text-gray-600 hover:text-gray-900 hover:bg-gray-50"
+                }`}
+              >
+                <GitPullRequest className="w-4 h-4" />
+                <span>Changes</span>
+                {pendingChangesetCount > 0 && (
+                  <span
+                    className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[11px] font-semibold ${
+                      activeTab === "changes"
+                        ? "bg-white text-black"
+                        : "bg-amber-100 text-amber-800"
+                    }`}
+                  >
+                    {pendingChangesetCount}
+                  </span>
+                )}
+              </button>
+              <button
                 onClick={() => setActiveTab("actions")}
                 className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                   activeTab === "actions"
@@ -1551,6 +2634,16 @@ export const Package = () => {
                 refreshKey={ciRefreshKey}
                 files={files}
                 onWorkflowSaved={handleWorkflowSaved}
+              />
+            ) : activeTab === "changes" ? (
+              <ChangesetsPanel
+                packageId={id}
+                changesets={changesets}
+                loading={changesetsLoading}
+                error={changesetsError}
+                onRefresh={fetchChangesets}
+                packageFiles={files}
+                onApproved={handleChangesetApproved}
               />
             ) : selectedFile ? (
               <FileViewer
@@ -1638,7 +2731,8 @@ export const Package = () => {
           </div>
 
           {/* Sidebar */}
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
             <h3 className="text-sm font-semibold text-gray-900 mb-3">About</h3>
 
             {packageData.description ? (
@@ -1683,6 +2777,10 @@ export const Package = () => {
                 );
               })}
             </div>
+            </div>
+
+            <ReleasesCard packageId={id} />
+            <CollaboratorsCard packageId={id} />
           </div>
         </div>
       </div>

@@ -26,7 +26,9 @@ import {
   Layers,
   ScrollText,
   CheckCircle,
-  XCircle
+  XCircle,
+  Gauge,
+  History
 } from 'lucide-react';
 import { Line } from 'react-chartjs-2';
 import {
@@ -380,6 +382,416 @@ const LifecycleCard = ({ children }) => (
   </div>
 );
 
+/* ---------------------------------------------------- Deployments view --- */
+
+const DEPLOYMENTS_POLL_MS = 10000;
+const EVENTS_POLL_MS = 15000;
+const EVENTS_LIMIT = 50;
+
+/** Format a probe spec ({type, port, path} or plain string) for its chip. */
+const formatProbe = (probe) => {
+  if (!probe) return null;
+  if (typeof probe === 'string') return probe;
+  if (typeof probe === 'object') {
+    const type = probe.type || probe.kind || 'http';
+    const port = probe.port != null ? ` :${probe.port}` : '';
+    const path = typeof probe.path === 'string' ? probe.path : '';
+    return `${type}${port}${path}`;
+  }
+  return String(probe);
+};
+
+/** Format an autoscale spec as "1–5 @70%". Returns null when not set. */
+const formatAutoscale = (autoscale) => {
+  if (!autoscale || typeof autoscale !== 'object') return null;
+  const min = autoscale.min ?? autoscale.min_replicas;
+  const max = autoscale.max ?? autoscale.max_replicas;
+  if (min == null || max == null) return null;
+  const target =
+    autoscale.cpu_percent ?? autoscale.target_cpu ?? autoscale.cpu ?? autoscale.target;
+  return target != null ? `${min}–${max} @${target}%` : `${min}–${max}`;
+};
+
+/** Status dot for a deployment container: missing → hollow, Up → green, else red. */
+const deploymentDotClass = (status) => {
+  const s = String(status || '').toLowerCase();
+  if (s === 'missing') return 'bg-transparent border-2 border-gray-300';
+  if (s.startsWith('up') || s.startsWith('running')) return 'bg-green-500';
+  return 'bg-red-500';
+};
+
+const CHIP_TONES = {
+  gray: 'bg-gray-100 text-gray-600 border-gray-200',
+  green: 'bg-green-50 text-green-600 border-green-200',
+  amber: 'bg-amber-50 text-amber-600 border-amber-200'
+};
+
+const DeployChip = ({ icon: Icon, text, title, tone = 'gray' }) => (
+  <span
+    title={title || undefined}
+    className={`inline-flex items-center space-x-1 px-2 py-0.5 rounded-full border text-[11px] font-mono ${
+      CHIP_TONES[tone] || CHIP_TONES.gray
+    }`}
+  >
+    {Icon ? <Icon className="w-3 h-3 flex-shrink-0" /> : null}
+    <span className="truncate">{text}</span>
+  </span>
+);
+
+/** "running/desired" pill: green when converged, amber + pulse while converging. */
+const ReplicasPill = ({ running, desired }) => {
+  const converged = running === desired;
+  return (
+    <span
+      title={converged ? 'All replicas running' : 'Converging to desired replicas'}
+      className={`inline-flex items-center px-2.5 py-0.5 rounded-full border text-xs font-mono font-semibold flex-shrink-0 ${
+        converged
+          ? 'bg-green-50 text-green-600 border-green-200'
+          : 'bg-amber-50 text-amber-600 border-amber-200 animate-pulse'
+      }`}
+    >
+      {running}/{desired}
+    </span>
+  );
+};
+
+/** One service of the workspace deployment, expandable to its containers. */
+const DeploymentServiceRow = ({ service }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  const desired = Number(service?.replicas ?? 0);
+  const running = Number(service?.running ?? 0);
+  const containers = Array.isArray(service?.containers) ? service.containers : [];
+  const allUp =
+    containers.length > 0 && containers.every((c) => isRunning(c?.status));
+  const probeText = formatProbe(service?.probe);
+  const autoscaleText = formatAutoscale(service?.autoscale);
+
+  return (
+    <div className="rounded-2xl border border-gray-100 p-3">
+      <button
+        onClick={() => setExpanded((prev) => !prev)}
+        className="w-full text-left"
+        title={expanded ? 'Hide containers' : 'Show containers'}
+      >
+        <div className="flex items-center justify-between space-x-2">
+          <span className="flex items-center space-x-1 min-w-0">
+            {expanded ? (
+              <ChevronDown className="w-4 h-4 flex-shrink-0 text-gray-400" />
+            ) : (
+              <ChevronRight className="w-4 h-4 flex-shrink-0 text-gray-400" />
+            )}
+            <span className="font-medium text-gray-900 text-sm truncate">
+              {service?.name || 'service'}
+            </span>
+          </span>
+          <ReplicasPill running={running} desired={desired} />
+        </div>
+        <p className="text-xs text-gray-400 font-mono truncate mt-1 pl-5">
+          {service?.image || ''}
+        </p>
+      </button>
+
+      <div className="flex flex-wrap gap-1.5 mt-2 pl-5">
+        {service?.restart ? (
+          <DeployChip
+            icon={RefreshCw}
+            text={String(service.restart)}
+            title={`Restart policy: ${service.restart}`}
+          />
+        ) : null}
+        {service?.memory ? (
+          <DeployChip
+            icon={MemoryStick}
+            text={String(service.memory)}
+            title="Memory limit"
+          />
+        ) : null}
+        {service?.cpus ? (
+          <DeployChip icon={Cpu} text={String(service.cpus)} title="CPU limit" />
+        ) : null}
+        {probeText ? (
+          <DeployChip
+            icon={Activity}
+            text={probeText}
+            title={`Probe: ${probeText}`}
+            tone={allUp ? 'green' : 'amber'}
+          />
+        ) : null}
+        {autoscaleText ? (
+          <DeployChip
+            icon={Gauge}
+            text={autoscaleText}
+            title={`Autoscale: ${autoscaleText}`}
+          />
+        ) : null}
+      </div>
+
+      {expanded && (
+        <div className="mt-2 pl-5 space-y-1.5">
+          {containers.length === 0 ? (
+            <p className="text-xs text-gray-400">No containers yet.</p>
+          ) : (
+            containers.map((c, index) => (
+              <div
+                key={`${c?.name || 'container'}-${index}`}
+                className="flex items-center space-x-2 text-xs min-w-0"
+              >
+                <span
+                  className={`w-2 h-2 rounded-full flex-shrink-0 ${deploymentDotClass(
+                    c?.status
+                  )}`}
+                ></span>
+                <span className="font-mono text-gray-700 truncate">
+                  {c?.name || '?'}
+                </span>
+                <span className="text-gray-400 truncate">{c?.status || ''}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * Desired-vs-running view of the workspace's k8s-style deployment. Hidden
+ * entirely while the backend has no deployment for this parent (404) or the
+ * endpoint has not landed yet. Polls while visible; `refreshSignal` bumps
+ * force an immediate refetch (e.g. right after a stack deploy).
+ */
+const DeploymentSection = ({ parentName, active, refreshSignal }) => {
+  const [deployment, setDeployment] = useState(null);
+  const requestRef = useRef(0);
+
+  const fetchDeployment = useCallback(async () => {
+    const token = requestRef.current + 1;
+    requestRef.current = token;
+    try {
+      const response = await fetch(
+        `${CONTAINERS_API}/deployments/${encodeURIComponent(parentName)}`,
+        { headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`deployments responded with ${response.status}`);
+      }
+      const body = await response.json();
+      if (requestRef.current === token) {
+        setDeployment(body && typeof body === 'object' ? body : null);
+      }
+    } catch (err) {
+      /* Graceful degradation: 404 / endpoint not deployed yet → hide section. */
+      if (requestRef.current === token) {
+        setDeployment(null);
+      }
+    }
+  }, [parentName]);
+
+  useEffect(() => {
+    if (!active) {
+      requestRef.current += 1;
+      setDeployment(null);
+      return undefined;
+    }
+    fetchDeployment();
+    const timer = setInterval(fetchDeployment, DEPLOYMENTS_POLL_MS);
+    return () => {
+      clearInterval(timer);
+      requestRef.current += 1;
+    };
+  }, [active, fetchDeployment, refreshSignal]);
+
+  const services = Array.isArray(deployment?.services) ? deployment.services : [];
+  if (!deployment || services.length === 0) return null;
+
+  return (
+    <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-lg border border-white/20 p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center space-x-2 min-w-0">
+          <div className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-lg flex items-center justify-center flex-shrink-0">
+            <Layers className="w-4 h-4 text-white" />
+          </div>
+          <h2 className="text-lg font-semibold text-gray-900">Deployment</h2>
+          {deployment.host ? (
+            <span className="text-xs text-gray-400 font-mono truncate">
+              · {deployment.host}
+            </span>
+          ) : null}
+        </div>
+        <button
+          onClick={fetchDeployment}
+          title="Refresh deployment"
+          className="w-9 h-9 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-all duration-200"
+        >
+          <RefreshCw className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="space-y-3">
+        {services.map((service, index) => (
+          <DeploymentServiceRow
+            key={service?.name || `service-${index}`}
+            service={service}
+          />
+        ))}
+      </div>
+
+      {deployment.updated_at ? (
+        <p className="text-xs text-gray-400 mt-3 text-right">
+          updated {new Date(deployment.updated_at).toLocaleTimeString()}
+        </p>
+      ) : null}
+    </div>
+  );
+};
+
+/* ---------------------------------------------------------------- Events --- */
+
+const EVENT_TYPES_RED = new Set(['probe_restart', 'service_failed', 'deploy_failed']);
+const EVENT_TYPES_AMBER = new Set(['self_heal', 'service_restarted']);
+
+/** Color classes for an event-type chip. Red set wins over the deploy* prefix. */
+const eventTypeClass = (type) => {
+  const t = String(type || '').toLowerCase();
+  if (EVENT_TYPES_RED.has(t)) return 'bg-red-50 text-red-600 border-red-100';
+  if (EVENT_TYPES_AMBER.has(t)) return 'bg-amber-50 text-amber-600 border-amber-100';
+  if (t.startsWith('deploy') || t === 'scale_up') {
+    return 'bg-green-50 text-green-600 border-green-100';
+  }
+  return 'bg-gray-100 text-gray-500 border-gray-200';
+};
+
+/**
+ * Collapsible workspace events timeline (kubectl-get-events style). Hidden
+ * until the events endpoint answers successfully; fetches once for the badge
+ * count and polls only while expanded.
+ */
+const EventsSection = ({ parentName, active }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [available, setAvailable] = useState(false);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const requestRef = useRef(0);
+
+  const fetchEvents = useCallback(async () => {
+    const token = requestRef.current + 1;
+    requestRef.current = token;
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `${CONTAINERS_API}/events?parent=${encodeURIComponent(
+          parentName
+        )}&limit=${EVENTS_LIMIT}`,
+        { headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`events responded with ${response.status}`);
+      }
+      const body = await response.json();
+      if (requestRef.current === token) {
+        setAvailable(true);
+        setEvents(Array.isArray(body) ? body : []);
+        setLoading(false);
+      }
+    } catch (err) {
+      /* Graceful degradation: endpoint may not exist yet → hide section. */
+      if (requestRef.current === token) {
+        setAvailable(false);
+        setEvents([]);
+        setLoading(false);
+      }
+    }
+  }, [parentName]);
+
+  useEffect(() => {
+    if (!active) {
+      requestRef.current += 1;
+      setAvailable(false);
+      setEvents([]);
+      setLoading(false);
+      return undefined;
+    }
+    fetchEvents();
+    const timer = expanded ? setInterval(fetchEvents, EVENTS_POLL_MS) : null;
+    return () => {
+      if (timer) clearInterval(timer);
+      requestRef.current += 1;
+    };
+  }, [active, expanded, fetchEvents]);
+
+  if (!available) return null;
+
+  return (
+    <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-lg border border-white/20 p-6">
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => setExpanded((prev) => !prev)}
+          className="flex items-center space-x-2 min-w-0 text-left"
+          title={expanded ? 'Collapse events' : 'Expand events'}
+        >
+          {expanded ? (
+            <ChevronDown className="w-4 h-4 flex-shrink-0 text-gray-400" />
+          ) : (
+            <ChevronRight className="w-4 h-4 flex-shrink-0 text-gray-400" />
+          )}
+          <History className="w-4 h-4 flex-shrink-0 text-gray-500" />
+          <span className="text-sm font-semibold text-gray-700">Events</span>
+          {!expanded && events.length > 0 && (
+            <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-xs font-mono">
+              {events.length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={fetchEvents}
+          disabled={loading}
+          title="Refresh events"
+          className="w-9 h-9 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-all duration-200 disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="mt-4 space-y-2 max-h-80 overflow-y-auto pr-1">
+          {events.length === 0 ? (
+            <p className="text-sm text-gray-400 py-2">No events yet.</p>
+          ) : (
+            events.map((event, index) => (
+              <div
+                key={`${event?.ts || 'event'}-${index}`}
+                className="flex items-start space-x-2 min-w-0"
+              >
+                <span className="text-xs text-gray-400 font-mono flex-shrink-0 pt-0.5 w-16">
+                  {event?.ts ? new Date(event.ts).toLocaleTimeString() : '—'}
+                </span>
+                <span
+                  className={`px-1.5 py-0.5 rounded-md border text-[10px] font-mono flex-shrink-0 ${eventTypeClass(
+                    event?.type
+                  )}`}
+                >
+                  {event?.type || 'event'}
+                </span>
+                <span className="text-sm text-gray-700 min-w-0 break-words flex-1">
+                  {event?.message || ''}
+                </span>
+                {event?.actor ? (
+                  <span className="text-xs text-gray-400 font-mono flex-shrink-0 pt-0.5">
+                    {event.actor}
+                  </span>
+                ) : null}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const Room = () => {
   const { id } = useParams();
   const parentName = roomParentName(id);
@@ -433,8 +845,10 @@ export const Room = () => {
 
   const [openModalDeploy, setOpenModalDeploy] = useState(false);
   const [selectedStackId, setSelectedStackId] = useState('');
+  const [deployHost, setDeployHost] = useState('auto'); // 'auto' | 'workspace'
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState(null);
+  const [deploymentsRefresh, setDeploymentsRefresh] = useState(0);
 
   const parentId = parent?.ID || null;
   const parentRunning = Boolean(parent && isRunning(parent.Status));
@@ -953,6 +1367,7 @@ export const Room = () => {
   const openDeployModal = () => {
     setDeployResult(null);
     setSelectedStackId('');
+    setDeployHost('auto');
     setOpenModalDeploy(true);
     fetchPackages();
   };
@@ -972,11 +1387,17 @@ export const Room = () => {
     setDeployResult(null);
     const stackLabel = selectedStackPkg?.name || 'stack';
 
+    // Host selection: "auto" lets the backend pick the least-loaded host;
+    // "workspace" targets this room's own host (withHost adds it when remote).
+    const stackUrl = `${CONTAINERS_API}/container/${parentId}/stack/${selectedStackId}`;
+    const requestUrl =
+      deployHost === 'auto' ? `${stackUrl}?host=auto` : withHost(stackUrl);
+
     try {
-      const response = await fetch(
-        withHost(`${CONTAINERS_API}/container/${parentId}/stack/${selectedStackId}`),
-        { method: 'POST', headers: { ...authHeaders() } }
-      );
+      const response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: { ...authHeaders() }
+      });
       if (redirectIfUnauthorized(response)) return;
       let body = null;
       try {
@@ -993,9 +1414,15 @@ export const Room = () => {
       }
       const deployed = Array.isArray(body?.deployed) ? body.deployed : [];
       const okCount = deployed.filter((service) => service?.ok).length;
-      setDeployResult({ ok: true, message: null, deployed });
+      setDeployResult({
+        ok: true,
+        message: null,
+        deployed,
+        host: typeof body?.host === 'string' ? body.host : null
+      });
       // Children changed inside the parent — refresh the panel (and, through
-      // it, the workspace bridge children count).
+      // it, the workspace bridge children count) and the Deployment section.
+      setDeploymentsRefresh((prev) => prev + 1);
       await fetchChildren(parentId);
       if (deployed.length > 0 && okCount === deployed.length) {
         toast.success(
@@ -1203,8 +1630,17 @@ export const Room = () => {
           lifecycleCard
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-            {/* Containers Panel (children of the workspace parent) */}
-            <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-lg border border-white/20 p-8 xl:col-span-1">
+            {/* Left column: deployment + containers + events */}
+            <div className="xl:col-span-1 space-y-6">
+              {/* Deployment (k8s-style desired vs running; hidden when absent) */}
+              <DeploymentSection
+                parentName={parentName}
+                active={parentRunning}
+                refreshSignal={deploymentsRefresh}
+              />
+
+              {/* Containers Panel (children of the workspace parent) */}
+              <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-lg border border-white/20 p-8">
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center space-x-3">
                   <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl flex items-center justify-center">
@@ -1346,6 +1782,10 @@ export const Room = () => {
                   })}
                 </div>
               )}
+              </div>
+
+              {/* Events timeline (hidden until the events endpoint responds) */}
+              <EventsSection parentName={parentName} active={parentRunning} />
             </div>
 
             {/* Right column: metrics + terminal */}
@@ -1821,6 +2261,27 @@ export const Room = () => {
 
               <div>
                 <label
+                  htmlFor="deployHostSelect"
+                  className="block text-sm font-semibold text-gray-700 mb-2"
+                >
+                  Host
+                </label>
+                <select
+                  id="deployHostSelect"
+                  value={deployHost}
+                  onChange={(e) => setDeployHost(e.target.value)}
+                  disabled={deploying}
+                  className="w-full px-4 py-3 bg-white/50 border border-gray-200 rounded-2xl focus:ring-2 focus:ring-black/20 focus:border-black/50 outline-none transition-all duration-200 disabled:opacity-50"
+                >
+                  <option value="auto">auto (least loaded)</option>
+                  <option value="workspace">
+                    {`this workspace's host (${roomHost || 'local'})`}
+                  </option>
+                </select>
+              </div>
+
+              <div>
+                <label
                   htmlFor="stackSelect"
                   className="block text-sm font-semibold text-gray-700 mb-2"
                 >
@@ -1914,6 +2375,12 @@ export const Room = () => {
               {deployResult && deployResult.ok && (
                 <div className="p-4 rounded-2xl border text-sm bg-gray-50/80 border-gray-200/50 space-y-2">
                   <p className="text-gray-900 font-medium">Deploy finished.</p>
+                  {deployResult.host && (
+                    <p className="text-gray-600">
+                      deployed on{' '}
+                      <span className="font-mono font-medium">{deployResult.host}</span>
+                    </p>
+                  )}
                   {deployResult.deployed.length === 0 ? (
                     <p className="text-gray-500">No services were reported.</p>
                   ) : (

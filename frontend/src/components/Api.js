@@ -672,21 +672,6 @@ async function listContainersWithMetrics(email, password) {
 
                         <EndpointCard
                           method="GET"
-                          path="/container/{id}/overload"
-                          description="Load test a container's HTTP endpoint and report latency percentiles and throughput."
-                          params={[
-                            { name: 'id', type: 'string', description: 'Container ID or name' }
-                          ]}
-                          response={{
-                            p50_ms: 12.4,
-                            p90_ms: 31.7,
-                            mean_ms: 15.2,
-                            qps: 480.5
-                          }}
-                        />
-
-                        <EndpointCard
-                          method="GET"
                           path="/system/health"
                           description="Host machine health: CPU, memory, and storage usage percentages."
                           response={{ cpu: 23.5, memory: 61.2, storage: 48.9 }}

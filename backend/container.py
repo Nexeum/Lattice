@@ -8,18 +8,16 @@ import threading
 import datetime
 import asyncio
 from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 import docker
 import gridfs
 import psutil
 import requests
 import time
-import numpy as np
 from pymongo import MongoClient, ReturnDocument
 from bson.objectid import ObjectId
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from auth_shared import require_user, require_user_query, decode_token, cors_origins, MONGO_URL
+from auth_shared import require_user, require_user_query, require_admin, decode_token, cors_origins, MONGO_URL
 
 def api_client_from_env():
     """Low-level APIClient resolved like docker.from_env (DOCKER_HOST, then
@@ -54,92 +52,6 @@ def get_container_ip(id):
     client = docker.from_env()
     container = client.containers.get(id)
     return container.attrs['NetworkSettings']['IPAddress']
-
-def make_request(ip):
-    try:
-        start_time = time.time()
-        response = requests.get(f'http://{ip}', timeout=5)
-        response_time = time.time() - start_time
-
-        if response.status_code == 200:
-            return response_time
-        else:
-            print(f'Error: Received status code {response.status_code}')
-            return None
-    except requests.RequestException as e:
-        print(f'Request Exception: {e}')
-        return None
-    
-def get_average_response_time(ip, num_requests=100):
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        response_times = list(filter(None, executor.map(lambda _: make_request(ip), range(num_requests))))
-
-    if response_times:
-        average_response_time = sum(response_times) / len(response_times)
-        return average_response_time
-    else:
-        return None
-
-def get_qps(ip, num_requests=100):
-    start_time = time.time()
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        executor.map(lambda _: make_request(ip), range(num_requests))
-
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-
-    qps = num_requests / elapsed_time if elapsed_time > 0 else 0
-    return qps
-
-def start_overload_test(container_id):
-    container = client.containers.get(container_id)
-    ports = container.attrs['NetworkSettings']['Ports']
-    if not ports:
-            ip = get_container_ip(id)
-    else:
-            port_mapping = next(iter(ports.values()))[0]
-            port = port_mapping['HostPort']
-            ip = f"localhost:{port}"
-
-    print(f'IP: {ip}')
-            
-    latencies = []
-
-    test_duration = 10
-    start_time = time.time()
-
-    while (time.time() - start_time) < test_duration:
-        latency = make_request(ip)
-        latencies.append(latency)
-
-    latencies = np.array(latencies)
-    p99 = np.percentile(latencies, 99)
-    p95 = np.percentile(latencies, 95)
-    p90 = np.percentile(latencies, 90)
-    mean = np.mean(latencies)
-    max_latency = np.max(latencies)
-    min_latency = np.min(latencies)
-
-    print(f"p99: {p99}")
-    print(f"p95: {p95}")
-    print(f"p90: {p90}")
-    print(f"mean: {mean}")
-    print(f"max: {max_latency}")
-    print(f"min: {min_latency}")
-
-    return {
-        "p99": p99,
-        "p95": p95,
-        "p90": p90,
-        "mean": mean,
-        "max": max_latency,
-        "min": min_latency
-    }
-
-@app.get("/container/{id}/overload")
-async def start_overload_test_endpoint(id: str, user=Depends(require_user)):
-    return start_overload_test(id)
 
 @app.get('/container/{container_id}/ip')
 async def get_container_ip(container_id: str, user=Depends(require_user)):
@@ -198,6 +110,7 @@ async def create_container_main(id: str, host: str = None, user=Depends(require_
         environment={"DOCKER_TLS_CERTDIR": ""},
         volumes=["/var/lib/docker"],
     )
+    record_event(id, "workspace_provisioned", f"workspace {id} provisioned", user.get("user_id"))
     for _ in range(NODE_DAEMON_TIMEOUT_SECONDS):
         check = container.exec_run("docker info --format {{.ServerVersion}}")
         if check.exit_code == 0:
@@ -268,27 +181,6 @@ async def create_container(container_id: str, name: str, image: str, shell: str,
     exec_id = container.exec_run(f"sh -c 'docker run -dit --privileged --name {name} {image} {shell}'", privileged=True)
     return {"output": exec_id.output.decode("utf-8")}
 
-@app.get("/container/{id}/aprox")
-async def read_metrics(id: str, user=Depends(require_user)):
-    try:
-        container = client.containers.get(id)
-        ports = container.attrs['NetworkSettings']['Ports']
-        if not ports:
-            ip = get_container_ip(id)
-        else:
-            port_mapping = next(iter(ports.values()))[0]
-            port = port_mapping['HostPort']
-            ip = f"localhost:{port}"
-        average_response_time = get_average_response_time(ip)
-        qps = get_qps(ip)
-
-        return {
-            "averageResponseTime": average_response_time,
-            "qps": qps
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
 PACKAGES_SERVICE_URL = os.environ.get("LATTICE_PACKAGES_URL", "http://localhost:5003")
 PLUGINS_DIR = "/opt/lattice/plugins"
 
@@ -333,6 +225,7 @@ async def install_package(container_id: str, package_id: str, host: str = None, 
         container.exec_run(f"sh -c 'mkdir -p {PLUGINS_DIR}'", privileged=True)
         container.put_archive(PLUGINS_DIR, build_package_tar(package_name, files))
         install_output = run_install_script(container, package_name, files)
+        record_event(container.name, "plugin_installed", f"plugin {package_name} installed", user.get("user_id"))
 
         return {
             "installed": package_name,
@@ -371,6 +264,8 @@ async def install_package_nested(outer_container_id: str, inner_container_id: st
             outer, package_name, files,
             docker_exec_prefix=f"docker exec {inner_container_id} ",
         )
+        record_event(outer.name, "plugin_installed",
+                     f"plugin {package_name} installed in {inner_container_id}", user.get("user_id"))
 
         return {
             "installed": package_name,
@@ -389,12 +284,56 @@ async def install_package_nested(outer_container_id: str, inner_container_id: st
 # ---------------------------------------------------------------------------
 
 STACK_MAX_SERVICES = 10
+STACK_MAX_REPLICAS = 10
 STACK_NAME_SANITIZE_RE = re.compile(r"[^a-z0-9-]")
+STACK_RESTART_POLICIES = ("no", "always")
+STACK_PROBE_TYPES = ("http", "tcp", "cmd")
+
+def parse_stack_probe(name, probe):
+    """Validate one service's probe spec ({"type": "http"|"tcp"|"cmd", ...});
+    raises 400 on anything malformed."""
+    if not isinstance(probe, dict):
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} probe must be an object")
+    probe_type = probe.get("type")
+    if probe_type not in STACK_PROBE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} probe type must be http, tcp or cmd")
+    if probe_type == "cmd":
+        command = str(probe.get("command") or "").strip()
+        if not command:
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} cmd probe needs a command")
+        return {"type": "cmd", "command": command}
+    try:
+        port = int(probe.get("port"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} probe needs an integer port")
+    if not 1 <= port <= 65535:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} probe port must be 1-65535")
+    validated = {"type": probe_type, "port": port}
+    if probe_type == "http":
+        validated["path"] = str(probe.get("path") or "/")
+    return validated
+
+def parse_stack_autoscale(name, autoscale):
+    """Validate one service's autoscale spec ({"min", "max", "targetCPU"});
+    raises 400 on anything malformed."""
+    if not isinstance(autoscale, dict):
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} autoscale must be an object")
+    minimum = autoscale.get("min", 1)
+    maximum = autoscale.get("max")
+    target = autoscale.get("targetCPU")
+    if not isinstance(minimum, int) or not isinstance(maximum, int) \
+            or isinstance(minimum, bool) or isinstance(maximum, bool) \
+            or not 1 <= minimum <= maximum <= STACK_MAX_REPLICAS:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} autoscale needs ints 1 <= min <= max <= {STACK_MAX_REPLICAS}")
+    if not isinstance(target, (int, float)) or isinstance(target, bool) or not 0 < target <= 100:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} autoscale targetCPU must be a number in (0, 100]")
+    return {"min": minimum, "max": maximum, "targetCPU": float(target)}
 
 def parse_stack_services(files):
     """Validate a stack plugin's stack.json: {"services": [{"name", "image",
-    "shell"?}]}. Names are sanitized to [a-z0-9-]; raises 400 on anything
-    malformed."""
+    "shell"?, "replicas"?, "restart"?, "memory"?, "cpus"?, "probe"?,
+    "autoscale"?}]}. Names are sanitized to [a-z0-9-]; an autoscale spec
+    implies restart "always"; raises 400 on anything malformed."""
     by_name = {f["name"]: f for f in files}
     stack_file = by_name.get("stack.json")
     if not stack_file or not stack_file.get("content"):
@@ -419,30 +358,101 @@ def parse_stack_services(files):
             raise HTTPException(status_code=400, detail="Invalid stack.json: each service needs a name ([a-z0-9-])")
         if not image:
             raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} has no image")
-        validated.append({"name": name, "image": image, "shell": shell})
+        replicas = service.get("replicas", 1)
+        if not isinstance(replicas, int) or isinstance(replicas, bool) or not 1 <= replicas <= STACK_MAX_REPLICAS:
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} replicas must be an int between 1 and {STACK_MAX_REPLICAS}")
+        restart = service.get("restart", "no")
+        if restart not in STACK_RESTART_POLICIES:
+            raise HTTPException(status_code=400, detail=f'Invalid stack.json: service {name} restart must be "always" or "no"')
+        memory = str(service.get("memory") or "").strip()
+        cpus = str(service.get("cpus") or "").strip()
+        probe = parse_stack_probe(name, service["probe"]) if service.get("probe") is not None else None
+        autoscale = parse_stack_autoscale(name, service["autoscale"]) if service.get("autoscale") is not None else None
+        if autoscale:
+            restart = "always"
+        validated.append({
+            "name": name, "image": image, "shell": shell,
+            "replicas": replicas, "restart": restart,
+            "memory": memory, "cpus": cpus,
+            "probe": probe, "autoscale": autoscale,
+        })
     return validated
 
-def deploy_stack_service(parent, service):
-    """docker run one service inside the parent; never raises."""
-    command = f"docker run -dit --privileged --name {service['name']} {service['image']}"
-    if service["shell"]:
+def run_stack_container(parent, service, index):
+    """docker run one replica (<service>-<index>) inside the parent; returns
+    (ok, last_line) and never raises. Restart policy is deliberately NOT
+    passed to docker — the reconciler owns it."""
+    command = f"docker run -dit --privileged --name {service['name']}-{index}"
+    if service.get("memory"):
+        command += f" --memory {service['memory']}"
+    if service.get("cpus"):
+        command += f" --cpus {service['cpus']}"
+    command += f" {service['image']}"
+    if service.get("shell"):
         command += f" {service['shell']}"
     try:
         exec_result = parent.exec_run(f"sh -c '{command}'", privileged=True)
         output = exec_result.output.decode("utf-8", errors="replace").strip()
         last_line = output.splitlines()[-1].strip() if output else ""
         ok = exec_result.exit_code == 0 and "error" not in last_line.lower()
-        return {"name": service["name"], "ok": ok, "output": last_line}
+        return ok, last_line
     except Exception as e:
-        return {"name": service["name"], "ok": False, "output": str(e)}
+        return False, str(e)
+
+def deploy_stack_service(parent, service):
+    """docker run every replica of one service inside the parent; returns one
+    result per container and never raises."""
+    results = []
+    for index in range(1, service["replicas"] + 1):
+        ok, output = run_stack_container(parent, service, index)
+        results.append({"name": f"{service['name']}-{index}", "ok": ok, "output": output})
+    return results
+
+def pick_auto_host():
+    """ECS-style placement: among "local" plus every registered host, pick the
+    reachable one whose docker runs the fewest containers."""
+    candidates = ["local"] + [doc.get("name", "") for doc in docker_hosts.find()]
+    best_host, best_count = None, None
+    for name in candidates:
+        try:
+            count = len(get_client(name).containers.list())
+        except Exception:
+            continue
+        if best_count is None or count < best_count:
+            best_host, best_count = name, count
+    if best_host is None:
+        raise HTTPException(status_code=503, detail="No docker host is reachable")
+    return best_host
 
 @app.post("/container/{parent_id}/stack/{package_id}")
 async def deploy_stack(parent_id: str, package_id: str, host: str = None, user=Depends(require_user), authorization: str = Header(None)):
     try:
         package, files = fetch_package_or_404(package_id, authorization)
         services = parse_stack_services(files)
+        host = pick_auto_host() if host == "auto" else (host or "local")
         parent = get_client(host).containers.get(parent_id)
-        return {"deployed": [deploy_stack_service(parent, service) for service in services]}
+        actor = user.get("user_id")
+        deployed = []
+        for service in services:
+            results = deploy_stack_service(parent, service)
+            deployed.extend(results)
+            event_type = "service_deployed" if all(r["ok"] for r in results) else "service_failed"
+            record_event(parent.name, event_type,
+                         f"service {service['name']} x{service['replicas']} ({service['image']})", actor)
+        deployments.update_one(
+            {"parent_name": parent.name},
+            {"$set": {
+                "parent_id": parent.id,
+                "parent_name": parent.name,
+                "host": host,
+                "package_id": package_id,
+                "services": services,
+                "updated_at": utc_now_iso(),
+            }},
+            upsert=True,
+        )
+        ensure_reconciler_started()
+        return {"deployed": deployed, "host": host}
     except HTTPException:
         raise
     except Exception as e:
@@ -461,6 +471,8 @@ CI_STEP_TIMEOUT_SECONDS = 120
 CI_ARTIFACT_MAX_FILE_BYTES = 10 * 1024 * 1024
 CI_ARTIFACT_MAX_FILES = 20
 CI_CONCURRENCY = int(os.environ.get("LATTICE_CI_CONCURRENCY", "2"))
+# "awaiting_approval" is deliberately NOT active: the SSE stream emits it as
+# the final state and closes; approve/reject continue the run out-of-band.
 CI_ACTIVE_STATUSES = {"queued", "starting", "running"}
 CI_WORKER_IDLE_SLEEP_SECONDS = 1
 
@@ -510,6 +522,28 @@ def plan_ci_steps(files):
     if not steps:
         steps.append({"name": "Validate files", "run": "ls -la"})
     return image, steps
+
+def plan_ci_deploy(files):
+    """CD half of the pipeline definition: the object form of lattice-ci.json
+    may carry {"deploy": {"workspace": "<parent container name>",
+    "environment"?: "<environment name>"}}. Returns the validated deploy
+    config, or None when absent/malformed (the run is then CI-only)."""
+    by_name = {f["name"]: f for f in files}
+    ci_file = by_name.get("lattice-ci.json")
+    if not ci_file or not ci_file.get("content"):
+        return None
+    try:
+        parsed = json.loads(ci_file["content"])
+    except (ValueError, TypeError):
+        return None
+    deploy = parsed.get("deploy") if isinstance(parsed, dict) else None
+    if not isinstance(deploy, dict):
+        return None
+    workspace = str(deploy.get("workspace") or "").strip()
+    if not workspace:
+        return None
+    environment = str(deploy.get("environment") or "").strip() or None
+    return {"workspace": workspace, "environment": environment}
 
 def create_ci_runner(run):
     """Create the runner container for a claimed run. This is the slow part
@@ -590,6 +624,95 @@ def post_ci_webhook(run, status, finished_at):
     except Exception:
         pass
 
+def deploy_run_stack(parent, run, files, actor):
+    """Stack half of execute_run_deploy: the same per-service pipeline as the
+    /container/{parent}/stack endpoint (docker run per replica + events +
+    deployments upsert + reconciler). Returns (ok, detail)."""
+    services = parse_stack_services(files)
+    deployed = []
+    for service in services:
+        results = deploy_stack_service(parent, service)
+        deployed.extend(results)
+        event_type = "service_deployed" if all(r["ok"] for r in results) else "service_failed"
+        record_event(parent.name, event_type,
+                     f"service {service['name']} x{service['replicas']} ({service['image']})", actor)
+    deployments.update_one(
+        {"parent_name": parent.name},
+        {"$set": {
+            "parent_id": parent.id,
+            "parent_name": parent.name,
+            "host": "local",
+            "package_id": run.get("package_id"),
+            "services": services,
+            "updated_at": utc_now_iso(),
+        }},
+        upsert=True,
+    )
+    ensure_reconciler_started()
+    started = sum(1 for r in deployed if r["ok"])
+    return started == len(deployed), f"stack deployed: {started}/{len(deployed)} containers started"
+
+def execute_run_deploy(run, actor=None):
+    """Execute a run's CD phase against its target workspace, using the file
+    snapshot stored on the run doc (not the live package). Packages with a
+    stack.json go through the stack pipeline; anything else installs as a
+    plugin under /opt/lattice/plugins/<name>. Deploys target the local host,
+    resolving the parent by exact container name. Stores deploy_result on the
+    run, records a deployed/deploy_failed event, and never raises."""
+    deploy = run.get("deploy") or {}
+    workspace = str(deploy.get("workspace") or "")
+    files = [f for f in run.get("files", []) if f.get("content") is not None]
+    package_name = run.get("package_name", "package")
+    try:
+        if not workspace:
+            raise ValueError("run has no deploy workspace")
+        if not files:
+            raise ValueError("run has no files to deploy")
+        try:
+            parent = client.containers.get(workspace)
+        except docker.errors.NotFound:
+            raise ValueError(f"workspace {workspace} not found")
+        if any(f["name"] == "stack.json" for f in files):
+            ok, detail = deploy_run_stack(parent, run, files, actor)
+        else:
+            parent.exec_run(f"sh -c 'mkdir -p {PLUGINS_DIR}'", privileged=True)
+            parent.put_archive(PLUGINS_DIR, build_package_tar(package_name, files))
+            run_install_script(parent, package_name, files)
+            ok, detail = True, f"installed {package_name} at {PLUGINS_DIR}/{package_name}"
+    except HTTPException as e:
+        ok, detail = False, str(e.detail)
+    except Exception as e:
+        ok, detail = False, str(e)
+    result = {"ok": ok, "detail": detail[:500]}
+    ci_runs.update_one({"_id": run["_id"]}, {"$set": {"deploy_result": result}})
+    record_event(workspace, "deployed" if ok else "deploy_failed",
+                 f"run #{run.get('number')} of {package_name}: {result['detail']}", actor)
+    return result
+
+def finalize_ci_run(run, status):
+    """Close out a run once its steps (and runner) are done. Successful runs
+    that carry a deploy config move on to the CD phase: a protected target
+    environment parks the run at "awaiting_approval" (finished_at stays null
+    until approve/reject); otherwise the deploy executes inline and decides
+    the final status."""
+    run_id = run["_id"]
+    deploy = run.get("deploy")
+    if status == "success" and deploy:
+        environment = environments.find_one({"name": deploy["environment"]}) if deploy.get("environment") else None
+        if environment and environment.get("protected"):
+            ci_runs.update_one({"_id": run_id}, {"$set": {"status": "awaiting_approval"}})
+            record_event(deploy.get("workspace"), "deploy_pending",
+                         f"run #{run.get('number')} of {run.get('package_name')} awaits approval for {deploy['environment']}")
+            return
+        result = execute_run_deploy(run)
+        status = "success" if result["ok"] else "failed"
+    finished_at = utc_now_iso()
+    ci_runs.update_one(
+        {"_id": run_id},
+        {"$set": {"status": status, "finished_at": finished_at}},
+    )
+    post_ci_webhook(run, status, finished_at)
+
 def execute_ci_run(run):
     """Execute a claimed run (status already "starting"). Creates the runner
     container, transitions to "running", executes steps, and finalizes."""
@@ -614,18 +737,15 @@ def execute_ci_run(run):
         status = "failed"
         ci_runs.update_one({"_id": run_id}, {"$set": {"error": str(e)}})
     finally:
+        # The runner goes away before any deploy: artifacts are already
+        # captured and the CD phase targets the workspace, not the runner.
         if runner is not None:
             capture_ci_artifacts(runner, run)
             try:
                 runner.remove(force=True)
             except Exception:
                 pass
-        finished_at = utc_now_iso()
-        ci_runs.update_one(
-            {"_id": run_id},
-            {"$set": {"status": status, "finished_at": finished_at}},
-        )
-        post_ci_webhook(run, status, finished_at)
+        finalize_ci_run(run, status)
 
 def claim_next_ci_run():
     """Atomically claim the oldest queued run, moving it to "starting"."""
@@ -710,6 +830,7 @@ async def trigger_ci_run(package_id: str, trigger: str = "manual", user=Depends(
         "status": "queued",
         "trigger": trigger,
         "image": image,
+        "deploy": plan_ci_deploy(files),
         "created_at": utc_now_iso(),
         "started_at": None,
         "finished_at": None,
@@ -729,15 +850,18 @@ async def list_ci_runs(package_id: str, user=Depends(require_user)):
     docs = ci_runs.find({"package_id": package_id}).sort("number", -1).limit(30)
     return attach_queue_positions(list(docs))
 
-@app.get("/ci/runs/{run_id}")
-async def get_ci_run(run_id: str, user=Depends(require_user)):
+def find_ci_run_or_404(run_id: str):
     try:
         doc = ci_runs.find_one({"_id": ObjectId(run_id)})
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid run id")
     if not doc:
         raise HTTPException(status_code=404, detail="Run not found")
-    return attach_queue_positions([doc])[0]
+    return doc
+
+@app.get("/ci/runs/{run_id}")
+async def get_ci_run(run_id: str, user=Depends(require_user)):
+    return attach_queue_positions([find_ci_run_or_404(run_id)])[0]
 
 CI_STREAM_MAX_SECONDS = 600
 CI_STREAM_POLL_SECONDS = 0.5
@@ -788,6 +912,203 @@ async def download_ci_artifact(run_id: str, artifact_id: str, user=Depends(requi
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+def require_deploy_actor(run, user, authorization):
+    """Approve/reject permission: admins always; otherwise the package owner,
+    fetched live from the packages service with the caller's token. Legacy
+    ownerless packages are open to any authenticated user."""
+    if user.get("role") == "admin":
+        return
+    headers = {"Authorization": authorization} if authorization else {}
+    try:
+        response = requests.get(
+            f"{PACKAGES_SERVICE_URL}/packages/{run['package_id']}",
+            headers=headers, timeout=15,
+        )
+    except Exception:
+        raise HTTPException(status_code=403, detail="Could not verify package ownership")
+    if response.status_code != 200:
+        raise HTTPException(status_code=403, detail="Could not verify package ownership")
+    owner = response.json().get("owner")
+    if owner and owner != user.get("user_id"):
+        raise HTTPException(status_code=403, detail="Only the package owner or an admin can decide this deploy")
+
+@app.post("/ci/runs/{run_id}/approve")
+async def approve_ci_deploy(run_id: str, user=Depends(require_user), authorization: str = Header(None)):
+    """Release a run parked at awaiting_approval: the deploy executes
+    synchronously in the request (a handful of docker execs) and decides the
+    final status."""
+    run = find_ci_run_or_404(run_id)
+    require_deploy_actor(run, user, authorization)
+    claimed = ci_runs.find_one_and_update(
+        {"_id": run["_id"], "status": "awaiting_approval"},
+        {"$set": {"status": "running"}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if claimed is None:
+        raise HTTPException(status_code=409, detail="Run is not awaiting approval")
+    result = execute_run_deploy(claimed, actor=user.get("user_id"))
+    status = "success" if result["ok"] else "failed"
+    finished_at = utc_now_iso()
+    ci_runs.update_one(
+        {"_id": run["_id"]},
+        {"$set": {"status": status, "finished_at": finished_at}},
+    )
+    post_ci_webhook(claimed, status, finished_at)
+    return serialize_run(ci_runs.find_one({"_id": run["_id"]}))
+
+@app.post("/ci/runs/{run_id}/reject")
+async def reject_ci_deploy(run_id: str, user=Depends(require_user), authorization: str = Header(None)):
+    run = find_ci_run_or_404(run_id)
+    require_deploy_actor(run, user, authorization)
+    finished_at = utc_now_iso()
+    updated = ci_runs.find_one_and_update(
+        {"_id": run["_id"], "status": "awaiting_approval"},
+        {"$set": {"status": "failed", "error": "Deploy rejected",
+                  "finished_at": finished_at}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(status_code=409, detail="Run is not awaiting approval")
+    record_event((run.get("deploy") or {}).get("workspace"), "deploy_rejected",
+                 f"run #{run.get('number')} of {run.get('package_name')} deploy rejected",
+                 user.get("user_id"))
+    post_ci_webhook(updated, "failed", finished_at)
+    return serialize_run(updated)
+
+CI_BADGE_LABEL = "lattice ci"
+CI_BADGE_UNKNOWN_STYLE = ("unknown", "#9f9f9f")
+CI_BADGE_STATUS_STYLES = {
+    "success": ("passing", "#4c1"),
+    "failed": ("failing", "#e05d44"),
+    "queued": ("pending", "#dfb317"),
+    "starting": ("pending", "#dfb317"),
+    "running": ("pending", "#dfb317"),
+    "awaiting_approval": ("pending", "#dfb317"),
+}
+CI_BADGE_CHAR_WIDTH = 7
+CI_BADGE_PADDING = 10
+
+def build_badge_svg(label, value, color):
+    """Hand-built flat two-segment shields-style badge (no image deps)."""
+    label_width = len(label) * CI_BADGE_CHAR_WIDTH + CI_BADGE_PADDING
+    value_width = len(value) * CI_BADGE_CHAR_WIDTH + CI_BADGE_PADDING
+    total_width = label_width + value_width
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="20" '
+        f'role="img" aria-label="{label}: {value}">'
+        f'<clipPath id="r"><rect width="{total_width}" height="20" rx="3" fill="#fff"/></clipPath>'
+        f'<g clip-path="url(#r)">'
+        f'<rect width="{label_width}" height="20" fill="#555"/>'
+        f'<rect x="{label_width}" width="{value_width}" height="20" fill="{color}"/>'
+        f'</g>'
+        f'<g fill="#fff" text-anchor="middle" '
+        f'font-family="DejaVu Sans Mono,Menlo,monospace" font-size="11">'
+        f'<text x="{label_width / 2}" y="14">{label}</text>'
+        f'<text x="{label_width + value_width / 2}" y="14">{value}</text>'
+        f'</g></svg>'
+    )
+
+@app.get("/ci/{package_id}/badge.svg")
+async def get_ci_badge(package_id: str):
+    """Deliberately unauthenticated (like shields.io): README-embeddable
+    badge that only exposes the pass/fail state of the latest run."""
+    latest = ci_runs.find_one({"package_id": package_id}, sort=[("number", -1)])
+    status = latest.get("status") if latest else None
+    value, color = CI_BADGE_STATUS_STYLES.get(status, CI_BADGE_UNKNOWN_STYLE)
+    return Response(
+        content=build_badge_svg(CI_BADGE_LABEL, value, color),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+# ---------------------------------------------------------------------------
+# Environments (GitHub-style CD deploy targets; protected ones gate deploys)
+# ---------------------------------------------------------------------------
+
+environments = ci_db['environments']
+
+ENVIRONMENT_NAME_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9._-]")
+
+@app.get("/environments")
+async def list_environments(user=Depends(require_user)):
+    return [
+        {"id": str(doc["_id"]), "name": doc.get("name", ""), "protected": bool(doc.get("protected"))}
+        for doc in environments.find().sort("name", 1)
+    ]
+
+@app.post("/environments")
+async def create_environment(body: dict, user=Depends(require_admin)):
+    name = ENVIRONMENT_NAME_SANITIZE_RE.sub("", str(body.get("name") or "").strip())
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required ([a-zA-Z0-9._-])")
+    if environments.find_one({"name": name}):
+        raise HTTPException(status_code=409, detail=f"Environment {name} already exists")
+    protected = bool(body.get("protected"))
+    inserted_id = environments.insert_one({"name": name, "protected": protected}).inserted_id
+    return {"id": str(inserted_id), "name": name, "protected": protected}
+
+@app.delete("/environments/{environment_id}")
+async def delete_environment(environment_id: str, user=Depends(require_admin)):
+    try:
+        object_id = ObjectId(environment_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid environment id")
+    if not environments.find_one_and_delete({"_id": object_id}):
+        raise HTTPException(status_code=404, detail="Environment not found")
+    return {"deleted": environment_id}
+
+# ---------------------------------------------------------------------------
+# Events (kubectl-events-style audit trail per workspace parent)
+# ---------------------------------------------------------------------------
+
+events = ci_db['events']
+
+EVENTS_TTL_SECONDS = 604800  # 7 days
+EVENTS_DEFAULT_LIMIT = 50
+EVENTS_MAX_LIMIT = 200
+
+_events_index_lock = threading.Lock()
+_events_index_created = False
+
+def ensure_events_index():
+    """Lazily create the TTL index that expires events after 7 days. Safe to
+    call on every write."""
+    global _events_index_created
+    with _events_index_lock:
+        if _events_index_created:
+            return
+        try:
+            events.create_index("ts_date", expireAfterSeconds=EVENTS_TTL_SECONDS)
+        except Exception:
+            pass
+        _events_index_created = True
+
+def record_event(parent_id, type, message, actor=None):
+    """Append one audit event for a workspace parent; best-effort, never
+    raises (events must not break the action they describe)."""
+    try:
+        ensure_events_index()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        events.insert_one({
+            "parent_id": parent_id,
+            "type": type,
+            "message": message,
+            "actor": actor,
+            "ts": now.isoformat(),
+            "ts_date": now,
+        })
+    except Exception:
+        pass
+
+@app.get("/events")
+async def list_events(parent: str = None, limit: int = EVENTS_DEFAULT_LIMIT, user=Depends(require_user)):
+    limit = max(1, min(limit, EVENTS_MAX_LIMIT))
+    query = {"parent_id": parent} if parent else {}
+    cursor = events.find(
+        query, {"_id": 0, "ts": 1, "type": 1, "message": 1, "actor": 1},
+    ).sort("ts_date", -1).limit(limit)
+    return list(cursor)
 
 # ---------------------------------------------------------------------------
 # Multi-host registry (Docker remotes)
@@ -883,7 +1204,7 @@ async def list_hosts(user=Depends(require_user)):
     return hosts
 
 @app.post("/hosts")
-async def add_host(body: dict, user=Depends(require_user)):
+async def add_host(body: dict, user=Depends(require_admin)):
     name = str(body.get("name") or "").strip()
     url = str(body.get("url") or "").strip()
     if not name or not url:
@@ -900,7 +1221,7 @@ async def add_host(body: dict, user=Depends(require_user)):
     return {"id": str(inserted_id), "name": name, "url": url, "status": "up"}
 
 @app.delete("/hosts/{host_id}")
-async def delete_host(host_id: str, user=Depends(require_user)):
+async def delete_host(host_id: str, user=Depends(require_admin)):
     try:
         object_id = ObjectId(host_id)
     except Exception:
@@ -991,12 +1312,246 @@ async def get_container_metrics_history(container_id: str, minutes: int = 60, us
     ).sort("ts", 1)
     return {"samples": list(cursor)}
 
+# ---------------------------------------------------------------------------
+# Deployments (desired state) + reconciler loop (the k8s core)
+# ---------------------------------------------------------------------------
+
+deployments = ci_db['deployments']
+
+RECONCILE_INTERVAL_SECONDS = 15
+PROBE_FAILURE_THRESHOLD = 3
+HPA_SCALE_DOWN_FACTOR = 0.5
+
+_reconciler_lock = threading.Lock()
+_reconciler_started = False
+_probe_failures = {}         # "parent:child" -> consecutive probe failures
+_reconcile_last_error = {}   # parent_name -> last recorded error message
+_last_desired_replicas = {}  # "parent:service" -> replicas at last reconcile
+
+def parent_ps(parent):
+    """docker ps -a inside the parent -> {container name: status}."""
+    exec_result = parent.exec_run(
+        "sh -c 'docker ps -a --format \"{{.ID}},{{.Names}},{{.Image}},{{.Status}}\"'",
+        privileged=True,
+    )
+    statuses = {}
+    for line in exec_result.output.decode("utf-8", errors="replace").splitlines():
+        parts = line.split(",", 3)
+        if len(parts) == 4:
+            statuses[parts[1]] = parts[3]
+    return statuses
+
+def parent_stats(parent):
+    """One docker stats pass inside the parent -> {container name: cpu %}.
+    Called at most once per parent per tick and shared across services."""
+    exec_result = parent.exec_run(
+        "sh -c 'docker stats --no-stream --format \"{{.Name}},{{.CPUPerc}}\"'",
+        privileged=True,
+    )
+    cpu_by_name = {}
+    for line in exec_result.output.decode("utf-8", errors="replace").splitlines():
+        if "," in line:
+            name, percent = line.split(",", 1)
+            cpu_by_name[name] = parse_percent(percent)
+    return cpu_by_name
+
+def child_ip(parent, child_name):
+    """A child's IP on the parent's default bridge (names don't resolve
+    there, so probes must target the IP)."""
+    exec_result = parent.exec_run(
+        "sh -c 'docker inspect --format \"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\" " + child_name + "'",
+        privileged=True,
+    )
+    return exec_result.output.decode("utf-8", errors="replace").strip()
+
+def run_probe(parent, child_name, probe):
+    """Execute one probe against a child from inside the parent; True when
+    healthy."""
+    if probe["type"] == "cmd":
+        check = parent.exec_run(
+            f"sh -c 'docker exec {child_name} sh -c \"{probe['command']}\"'", privileged=True,
+        )
+        return check.exit_code == 0
+    ip = child_ip(parent, child_name)
+    if not ip:
+        return False
+    if probe["type"] == "http":
+        check = parent.exec_run(
+            f"sh -c 'wget -qO- --timeout=3 http://{ip}:{probe['port']}{probe['path']} >/dev/null'",
+            privileged=True,
+        )
+    else:
+        check = parent.exec_run(f"sh -c 'nc -z -w 3 {ip} {probe['port']}'", privileged=True)
+    return check.exit_code == 0
+
+def reconcile_probe(parent, parent_name, service, child):
+    """Track consecutive probe failures; restart the child at the threshold."""
+    key = f"{parent_name}:{child}"
+    if run_probe(parent, child, service["probe"]):
+        _probe_failures.pop(key, None)
+        return
+    failures = _probe_failures.get(key, 0) + 1
+    if failures >= PROBE_FAILURE_THRESHOLD:
+        parent.exec_run(f"sh -c 'docker restart {child}'", privileged=True)
+        record_event(parent_name, "probe_restart", f"probe failed {failures}x, restarted {child}")
+        _probe_failures.pop(key, None)
+    else:
+        _probe_failures[key] = failures
+
+def excess_replicas(service_name, desired, statuses):
+    """Container names <service>-i present in the parent with i above the
+    desired replica count."""
+    pattern = re.compile(re.escape(service_name) + r"-(\d+)$")
+    return [
+        child for child in statuses
+        if (match := pattern.fullmatch(child)) and int(match.group(1)) > desired
+    ]
+
+def reconcile_service(parent, parent_name, service, statuses):
+    """Drive one service towards its desired state: recreate missing replicas,
+    restart exited ones (restart=always), remove excess indexes."""
+    name = service["name"]
+    desired = service["replicas"]
+    key = f"{parent_name}:{name}"
+    previous_desired = _last_desired_replicas.get(key)
+    _last_desired_replicas[key] = desired
+
+    for index in range(1, desired + 1):
+        child = f"{name}-{index}"
+        status = statuses.get(child)
+        if status is None:
+            ok, _ = run_stack_container(parent, service, index)
+            if ok:
+                grown = previous_desired is not None and index > previous_desired
+                record_event(parent_name, "scale_up" if grown else "self_heal",
+                             f"started missing replica {child}")
+        elif status.startswith("Up"):
+            if service.get("probe"):
+                reconcile_probe(parent, parent_name, service, child)
+        elif service["restart"] == "always":
+            parent.exec_run(f"sh -c 'docker start {child}'", privileged=True)
+            record_event(parent_name, "service_restarted", f"restarted exited replica {child}")
+
+    for child in excess_replicas(name, desired, statuses):
+        parent.exec_run(f"sh -c 'docker rm -f {child}'", privileged=True)
+        _probe_failures.pop(f"{parent_name}:{child}", None)
+        record_event(parent_name, "scale_down", f"removed excess replica {child}")
+
+def reconcile_autoscale(doc, service_index, service, cpu_by_name):
+    """One HPA step per tick: compare the service's average CPU against
+    targetCPU and move desired replicas by at most one. Only the doc changes
+    here — the next tick creates/removes the containers."""
+    autoscale = service["autoscale"]
+    replicas = service["replicas"]
+    samples = [
+        cpu_by_name[f"{service['name']}-{i}"]
+        for i in range(1, replicas + 1)
+        if f"{service['name']}-{i}" in cpu_by_name
+    ]
+    if not samples:
+        return
+    average = sum(samples) / len(samples)
+    desired = replicas
+    event_type = None
+    if average > autoscale["targetCPU"] and replicas < autoscale["max"]:
+        desired, event_type = replicas + 1, "scale_up hpa"
+    elif average < autoscale["targetCPU"] * HPA_SCALE_DOWN_FACTOR and replicas > autoscale["min"]:
+        desired, event_type = replicas - 1, "scale_down hpa"
+    if event_type is None:
+        return
+    deployments.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {f"services.{service_index}.replicas": desired, "updated_at": utc_now_iso()}},
+    )
+    record_event(doc["parent_name"], event_type,
+                 f"{service['name']} avg cpu {round(average, 1)}% -> replicas {desired}")
+
+def reconcile_deployment(doc):
+    parent = get_client(doc.get("host")).containers.get(doc["parent_name"])
+    statuses = parent_ps(parent)
+    services = doc.get("services", [])
+    cpu_by_name = parent_stats(parent) if any(s.get("autoscale") for s in services) else {}
+    for index, service in enumerate(services):
+        reconcile_service(parent, doc["parent_name"], service, statuses)
+        if service.get("autoscale"):
+            reconcile_autoscale(doc, index, service, cpu_by_name)
+
+def reconciler_loop():
+    while True:
+        try:
+            docs = list(deployments.find())
+        except Exception:
+            docs = []
+        for doc in docs:
+            parent_name = doc.get("parent_name", "")
+            try:
+                reconcile_deployment(doc)
+                _reconcile_last_error.pop(parent_name, None)
+            except Exception as e:
+                message = str(e)
+                if _reconcile_last_error.get(parent_name) != message:
+                    _reconcile_last_error[parent_name] = message
+                    record_event(parent_name, "reconcile_error", message[:500])
+        time.sleep(RECONCILE_INTERVAL_SECONDS)
+
+def ensure_reconciler_started():
+    """Lazily start the single reconciler daemon thread. Safe to call on
+    every deploy/read."""
+    global _reconciler_started
+    with _reconciler_lock:
+        if _reconciler_started:
+            return
+        threading.Thread(
+            target=reconciler_loop, name="lattice-reconciler", daemon=True,
+        ).start()
+        _reconciler_started = True
+
+@app.get("/deployments/{parent}")
+async def get_deployment(parent: str, user=Depends(require_user)):
+    ensure_reconciler_started()
+    doc = deployments.find_one({"$or": [{"parent_name": parent}, {"parent_id": parent}]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    try:
+        parent_container = get_client(doc.get("host")).containers.get(doc["parent_name"])
+        statuses = parent_ps(parent_container)
+    except Exception:
+        statuses = {}
+    services = []
+    for service in doc.get("services", []):
+        containers = [
+            {"name": f"{service['name']}-{i}",
+             "status": statuses.get(f"{service['name']}-{i}", "missing")}
+            for i in range(1, service["replicas"] + 1)
+        ]
+        services.append({
+            "name": service["name"],
+            "image": service["image"],
+            "replicas": service["replicas"],
+            "running": sum(1 for c in containers if c["status"].startswith("Up")),
+            "restart": service["restart"],
+            "memory": service["memory"],
+            "cpus": service["cpus"],
+            "probe": service["probe"],
+            "autoscale": service["autoscale"],
+            "containers": containers,
+        })
+    return {
+        "parent_id": doc.get("parent_id"),
+        "parent_name": doc.get("parent_name"),
+        "host": doc.get("host"),
+        "package_id": doc.get("package_id"),
+        "updated_at": doc.get("updated_at"),
+        "services": services,
+    }
+
 @app.post("/container/{container_id}/start")
 async def start_container(container_id: str, host: str = None, user=Depends(require_user)):
     docker_client = get_client(host)
     try:
         container = docker_client.containers.get(container_id)
         container.start()
+        record_event(container.name, "container_started", f"container {container.name} started", user.get("user_id"))
         return {"message": f"Container {container_id} started"}
     except Exception as e:
         raise HTTPException(status_code=500, detail={'error': 'Failed to start container', 'message': str(e)})

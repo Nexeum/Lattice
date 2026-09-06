@@ -40,3 +40,11 @@ def require_user_query(token: str = Query(None)):
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
     return decode_token(token)
+
+
+def require_admin(authorization: str = Header(None)):
+    """require_user plus an admin role check (tokens without a role are plain users)."""
+    payload = require_user(authorization)
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return payload

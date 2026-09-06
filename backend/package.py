@@ -1,16 +1,20 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from typing import List
+from datetime import datetime, timezone
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from bson.errors import InvalidId
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import UploadFile, File
+from fastapi.responses import JSONResponse, StreamingResponse
 import gridfs
 from gridfs.errors import NoFile
+import io
 import os
+import tarfile
 import requests
 
-from auth_shared import MONGO_URL, cors_origins, require_user
+from auth_shared import MONGO_URL, cors_origins, require_user, require_user_query
 
 CONTAINERS_SERVICE_URL = os.environ.get("LATTICE_CONTAINERS_URL", "http://localhost:5001")
 
@@ -29,7 +33,67 @@ app.add_middleware(
 client = MongoClient(MONGO_URL)
 db = client['kubehub']
 collection = db['package']
+changesets = db['changesets']
+releases = db['releases']
+users_collection = client['lattice_db']['user']
 fs = gridfs.GridFS(db)
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def can_write(package, user):
+    """Write access: legacy packages (no owner) are open; otherwise the owner,
+    any collaborator, or an admin."""
+    owner = package.get("owner")
+    if not owner:
+        return True
+    if user.get("role") == "admin":
+        return True
+    return user["user_id"] == owner or user["user_id"] in package.get("collaborators", [])
+
+def require_owner_or_admin(package, user):
+    if user.get("role") == "admin":
+        return
+    if package.get("owner") != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Only the owner or an admin can manage collaborators")
+
+def find_package_or_404(package_id: str):
+    try:
+        package = collection.find_one({"_id": ObjectId(package_id)})
+    except InvalidId:
+        package = None
+    if package is None:
+        raise HTTPException(status_code=404, detail="Package not found")
+    return package
+
+def resolve_user_email(user_id: str):
+    """Best-effort lookup of a user's email in the identity database."""
+    user_doc = None
+    try:
+        user_doc = users_collection.find_one({"_id": ObjectId(user_id)})
+    except (InvalidId, TypeError):
+        pass
+    if user_doc is None:
+        user_doc = users_collection.find_one({"_id": user_id})
+    return user_doc.get("email") if user_doc else None
+
+def collaborator_list(package):
+    return [
+        {"id": user_id, "email": resolve_user_email(user_id)}
+        for user_id in package.get("collaborators", [])
+    ]
+
+def trigger_ci_push(package_id: str, authorization: str):
+    """Fire the CI pipeline (push trigger); never fail the caller if CI is down."""
+    try:
+        requests.post(
+            f"{CONTAINERS_SERVICE_URL}/ci/{package_id}/run",
+            params={"trigger": "push"},
+            headers={"Authorization": authorization},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 def namespaced_filename(package_id: str, name: str):
     return f"{package_id}:{name}"
@@ -86,6 +150,9 @@ async def get_package(package_id: str, user=Depends(require_user)):
 
 @app.put("/packages/{package_id}")
 async def update_package(package_id: str, package: dict, user=Depends(require_user)):
+    existing_package = find_package_or_404(package_id)
+    if not can_write(existing_package, user):
+        raise HTTPException(status_code=403, detail="You do not have write access to this plugin")
     collection.update_one({"_id": ObjectId(package_id)}, {"$set": package})
     updated_package = collection.find_one({"_id": ObjectId(package_id)})
     if updated_package is not None:
@@ -99,7 +166,7 @@ async def delete_package(package_id: str, user=Depends(require_user)):
     package = collection.find_one({"_id": ObjectId(package_id)})
     if package is not None:
         owner = package.get("owner")
-        if owner and owner != user["user_id"]:
+        if owner and owner != user["user_id"] and user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Only the owner can delete this plugin")
     collection.delete_one({"_id": ObjectId(package_id)})
     return {"message": "Package deleted successfully"}
@@ -113,22 +180,33 @@ async def upload_file_to_package(package_id: str, file: UploadFile = File(...),
 
     contents = await file.read()
 
+    if not can_write(package, user):
+        # Outside contributor: capture the file as a changeset ("pull request")
+        # instead of writing to the package.
+        changeset_id = upsert_pending_changeset(package_id, user, file.filename, contents)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "changeset_id": changeset_id,
+                "status": "pending",
+                "message": "Contribution submitted for review",
+            },
+        )
+
     # Store the file content in GridFS under a package-namespaced filename
     fs.put(contents, filename=namespaced_filename(package_id, file.filename))
 
     file_info = {"name": file.filename, "size": len(contents)}
-    collection.update_one({"_id": ObjectId(package_id)}, {"$push": {"files": file_info}})
+    if any(f.get("name") == file.filename for f in package.get("files", [])):
+        collection.update_one(
+            {"_id": ObjectId(package_id), "files.name": file.filename},
+            {"$set": {"files.$.size": len(contents)}},
+        )
+    else:
+        collection.update_one({"_id": ObjectId(package_id)}, {"$push": {"files": file_info}})
 
     # Fire the CI pipeline (push trigger); never fail the upload if CI is down
-    try:
-        requests.post(
-            f"{CONTAINERS_SERVICE_URL}/ci/{package_id}/run",
-            params={"trigger": "push"},
-            headers={"Authorization": authorization},
-            timeout=5,
-        )
-    except Exception:
-        pass
+    trigger_ci_push(package_id, authorization)
 
     return {"message": "File uploaded successfully"}
 
@@ -168,9 +246,8 @@ async def rollback_file_version(package_id: str, name: str, version_id: str, use
     if package is None:
         raise HTTPException(status_code=404, detail="Package not found")
 
-    owner = package.get("owner")
-    if owner and owner != user["user_id"]:
-        raise HTTPException(status_code=403, detail="Only the owner can roll back this plugin")
+    if not can_write(package, user):
+        raise HTTPException(status_code=403, detail="You do not have write access to this plugin")
 
     try:
         grid_out = fs.get(ObjectId(version_id))
@@ -188,3 +265,245 @@ async def rollback_file_version(package_id: str, name: str, version_id: str, use
 
     updated_package = collection.find_one({"_id": ObjectId(package_id)})
     return serialize_package_with_files(updated_package)
+
+# ---------------------------------------------------------------------------
+# Collaborators
+# ---------------------------------------------------------------------------
+
+@app.get("/packages/{package_id}/collaborators")
+async def get_collaborators(package_id: str, user=Depends(require_user)):
+    package = find_package_or_404(package_id)
+    require_owner_or_admin(package, user)
+    return collaborator_list(package)
+
+@app.post("/packages/{package_id}/collaborators")
+async def add_collaborator(package_id: str, body: dict, user=Depends(require_user)):
+    package = find_package_or_404(package_id)
+    require_owner_or_admin(package, user)
+
+    email = (body.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    user_doc = users_collection.find_one({"email": email})
+    if user_doc is None:
+        raise HTTPException(status_code=404, detail="No user found with that email")
+
+    collaborator_id = str(user_doc["_id"])
+    collection.update_one(
+        {"_id": ObjectId(package_id)},
+        {"$addToSet": {"collaborators": collaborator_id}},
+    )
+    updated_package = collection.find_one({"_id": ObjectId(package_id)})
+    return collaborator_list(updated_package)
+
+@app.delete("/packages/{package_id}/collaborators/{collaborator_id}")
+async def remove_collaborator(package_id: str, collaborator_id: str, user=Depends(require_user)):
+    package = find_package_or_404(package_id)
+    require_owner_or_admin(package, user)
+
+    collection.update_one(
+        {"_id": ObjectId(package_id)},
+        {"$pull": {"collaborators": collaborator_id}},
+    )
+    updated_package = collection.find_one({"_id": ObjectId(package_id)})
+    return collaborator_list(updated_package)
+
+# ---------------------------------------------------------------------------
+# Changesets (plugin "pull requests")
+# ---------------------------------------------------------------------------
+
+def upsert_pending_changeset(package_id: str, user, filename: str, contents: bytes):
+    """One pending changeset per (package, author): upsert the file into it."""
+    now = utc_now_iso()
+    file_entry = {"name": filename, "content": contents.decode("utf-8", errors="replace")}
+
+    existing = changesets.find_one(
+        {"package_id": package_id, "author": user["user_id"], "status": "pending"}
+    )
+    if existing is not None:
+        files = [entry for entry in existing["files"] if entry["name"] != filename]
+        files.append(file_entry)
+        changesets.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {"files": files, "updated_at": now}},
+        )
+        return str(existing["_id"])
+
+    changeset = {
+        "package_id": package_id,
+        "author": user["user_id"],
+        "author_email": resolve_user_email(user["user_id"]),
+        "files": [file_entry],
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+    result = changesets.insert_one(changeset)
+    return str(result.inserted_id)
+
+def find_changeset_or_404(package_id: str, changeset_id: str):
+    try:
+        changeset = changesets.find_one({"_id": ObjectId(changeset_id), "package_id": package_id})
+    except InvalidId:
+        changeset = None
+    if changeset is None:
+        raise HTTPException(status_code=404, detail="Changeset not found")
+    return changeset
+
+@app.get("/packages/{package_id}/changesets")
+async def get_changesets(package_id: str, user=Depends(require_user)):
+    find_package_or_404(package_id)
+    docs = list(changesets.find({"package_id": package_id}))
+    docs.sort(key=lambda doc: doc.get("created_at", ""), reverse=True)
+    docs.sort(key=lambda doc: 0 if doc.get("status") == "pending" else 1)
+    return [
+        {
+            "_id": str(doc["_id"]),
+            "author": doc.get("author"),
+            "author_email": doc.get("author_email"),
+            "status": doc.get("status"),
+            "files": [entry["name"] for entry in doc.get("files", [])],
+            "created_at": doc.get("created_at"),
+        }
+        for doc in docs[:50]
+    ]
+
+@app.get("/packages/{package_id}/changesets/{changeset_id}")
+async def get_changeset(package_id: str, changeset_id: str, user=Depends(require_user)):
+    find_package_or_404(package_id)
+    changeset = find_changeset_or_404(package_id, changeset_id)
+    changeset["_id"] = str(changeset["_id"])
+    return changeset
+
+@app.post("/packages/{package_id}/changesets/{changeset_id}/approve")
+async def approve_changeset(package_id: str, changeset_id: str,
+                            user=Depends(require_user), authorization: str = Header(None)):
+    package = find_package_or_404(package_id)
+    if not can_write(package, user):
+        raise HTTPException(status_code=403, detail="You do not have write access to this plugin")
+
+    changeset = find_changeset_or_404(package_id, changeset_id)
+    if changeset.get("status") != "pending":
+        raise HTTPException(status_code=409, detail="Changeset is not pending")
+
+    # Apply each file exactly like a normal upload
+    for entry in changeset.get("files", []):
+        contents = entry["content"].encode("utf-8")
+        fs.put(contents, filename=namespaced_filename(package_id, entry["name"]))
+        if any(file["name"] == entry["name"] for file in package.get("files", [])):
+            collection.update_one(
+                {"_id": ObjectId(package_id), "files.name": entry["name"]},
+                {"$set": {"files.$.size": len(contents)}},
+            )
+        else:
+            file_info = {"name": entry["name"], "size": len(contents)}
+            collection.update_one({"_id": ObjectId(package_id)}, {"$push": {"files": file_info}})
+
+    changesets.update_one(
+        {"_id": changeset["_id"]},
+        {"$set": {"status": "approved", "approved_by": user["user_id"], "updated_at": utc_now_iso()}},
+    )
+
+    # One CI push trigger for the whole changeset
+    trigger_ci_push(package_id, authorization)
+
+    return {"message": "Changeset approved", "changeset_id": changeset_id, "status": "approved"}
+
+@app.post("/packages/{package_id}/changesets/{changeset_id}/reject")
+async def reject_changeset(package_id: str, changeset_id: str, user=Depends(require_user)):
+    package = find_package_or_404(package_id)
+    changeset = find_changeset_or_404(package_id, changeset_id)
+
+    # Reviewers may reject; authors may withdraw their own
+    if not can_write(package, user) and changeset.get("author") != user["user_id"]:
+        raise HTTPException(status_code=403, detail="You cannot reject this changeset")
+
+    if changeset.get("status") != "pending":
+        raise HTTPException(status_code=409, detail="Changeset is not pending")
+
+    changesets.update_one(
+        {"_id": changeset["_id"]},
+        {"$set": {"status": "rejected", "rejected_by": user["user_id"], "updated_at": utc_now_iso()}},
+    )
+    return {"message": "Changeset rejected", "changeset_id": changeset_id, "status": "rejected"}
+
+# ---------------------------------------------------------------------------
+# Releases
+# ---------------------------------------------------------------------------
+
+@app.post("/packages/{package_id}/releases")
+async def create_release(package_id: str, body: dict, user=Depends(require_user)):
+    package = find_package_or_404(package_id)
+    if not can_write(package, user):
+        raise HTTPException(status_code=403, detail="You do not have write access to this plugin")
+
+    version = (body.get("version") or "").strip()
+    if not version:
+        raise HTTPException(status_code=400, detail="Version is required")
+    if releases.find_one({"package_id": package_id, "version": version}) is not None:
+        raise HTTPException(status_code=400, detail=f"Release {version} already exists for this package")
+
+    # Snapshot the current file contents
+    snapshot = []
+    for file in package.get("files", []):
+        try:
+            content = load_file_content(package_id, file["name"])
+        except NoFile:
+            raise HTTPException(status_code=404, detail=f"File {file['name']} not found")
+        snapshot.append({"name": file["name"], "content": content})
+
+    release = {
+        "package_id": package_id,
+        "version": version,
+        "notes": body.get("notes", ""),
+        "files": snapshot,
+        "created_by": user["user_id"],
+        "created_at": utc_now_iso(),
+    }
+    result = releases.insert_one(release)
+    release["_id"] = str(result.inserted_id)
+    return release
+
+@app.get("/packages/{package_id}/releases")
+async def get_releases(package_id: str, user=Depends(require_user)):
+    find_package_or_404(package_id)
+    docs = list(releases.find({"package_id": package_id}))
+    docs.sort(key=lambda doc: doc.get("created_at", ""), reverse=True)
+    return [
+        {
+            "_id": str(doc["_id"]),
+            "version": doc.get("version"),
+            "notes": doc.get("notes"),
+            "files": [entry["name"] for entry in doc.get("files", [])],
+            "created_at": doc.get("created_at"),
+        }
+        for doc in docs
+    ]
+
+@app.get("/packages/{package_id}/releases/{release_id}/download")
+async def download_release(package_id: str, release_id: str, user=Depends(require_user_query)):
+    package = find_package_or_404(package_id)
+    try:
+        release = releases.find_one({"_id": ObjectId(release_id), "package_id": package_id})
+    except InvalidId:
+        release = None
+    if release is None:
+        raise HTTPException(status_code=404, detail="Release not found")
+
+    # Build an in-memory tar.gz of the snapshot files
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for entry in release.get("files", []):
+            data = entry["content"].encode("utf-8")
+            info = tarfile.TarInfo(name=entry["name"])
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    buffer.seek(0)
+
+    filename = f"{package.get('name', 'package')}-{release['version']}.tar.gz"
+    return StreamingResponse(
+        buffer,
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

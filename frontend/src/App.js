@@ -17,6 +17,7 @@ import { Home } from "./components/Home";
 import { PublicNavbar } from "./components/PublicNavbar";
 import { Toasts } from "./components/Toasts";
 import ApiDocumentation from './components/Api';
+import { Admin } from "./components/Admin";
 import { CommandPalette } from "./components/CommandPalette";
 import { startTokenRefresh } from "./lib/api";
 import { initTheme } from "./lib/theme";
@@ -275,6 +276,12 @@ function App() {
                     exact
                     path="/api-docs"
                     component={ApiDocumentation}
+                    authenticated={authenticated}
+                  />
+                  <ProtectedRoute
+                    exact
+                    path="/admin"
+                    component={Admin}
                     authenticated={authenticated}
                   />
                   <Redirect to="/" />

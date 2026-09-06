@@ -17,7 +17,12 @@ import {
   Server,
   Loader
 } from "lucide-react";
-import { authHeaders, redirectIfUnauthorized } from "../lib/api";
+import {
+  authHeaders,
+  redirectIfUnauthorized,
+  getTokenPayload,
+  getRole
+} from "../lib/api";
 import { toast } from "../lib/toast";
 
 const ROOMS_API = "http://localhost:5002";
@@ -34,15 +39,274 @@ const HostStatusDot = ({ status }) => {
   return <span className={`w-2 h-2 rounded-full flex-shrink-0 ${color}`}></span>;
 };
 
+// Members management modal — owner (or admin) adds/removes workspace members.
+const MembersModal = ({ room, onClose, onRoomChange }) => {
+  const [members, setMembers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [newEmail, setNewEmail] = useState("");
+  const [addError, setAddError] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [removingId, setRemovingId] = useState(null);
+
+  const fetchMembers = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`${ROOMS_API}/rooms/${room._id}/members`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`Members endpoint responded with ${response.status}`);
+      }
+      const data = await response.json();
+      setMembers(Array.isArray(data) ? data : []);
+    } catch (err) {
+      setError("Could not load members. Please try again.");
+      setMembers([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [room._id]);
+
+  useEffect(() => {
+    fetchMembers();
+  }, [fetchMembers]);
+
+  const handleAddMember = async () => {
+    const email = newEmail.trim();
+    if (!email) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      const response = await fetch(`${ROOMS_API}/rooms/${room._id}/members`, {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ email })
+      });
+      if (redirectIfUnauthorized(response)) return;
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        body = null;
+      }
+      if (response.status === 404) {
+        setAddError(String(body?.detail || "No user with that email"));
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(
+          String(body?.detail || `Adding the member failed with status ${response.status}`)
+        );
+      }
+      // Backend echoes the updated room (incl. member_emails)
+      if (body && body._id) {
+        onRoomChange(body);
+      }
+      setNewEmail("");
+      toast.success(`${email} added to "${room.name}"`);
+      await fetchMembers();
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : "Could not add the member.");
+      toast.error(`Could not add ${email}`);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleRemoveMember = async (member) => {
+    setRemovingId(member.id);
+    setAddError(null);
+    try {
+      const response = await fetch(
+        `${ROOMS_API}/rooms/${room._id}/members/${encodeURIComponent(member.id)}`,
+        { method: "DELETE", headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`Remove failed with status ${response.status}`);
+      }
+      setMembers((prev) => prev.filter((m) => m.id !== member.id));
+      onRoomChange({
+        ...room,
+        member_emails: Array.isArray(room.member_emails)
+          ? room.member_emails.filter((e) => e !== member.email)
+          : room.member_emails
+      });
+      toast.success(`${member.email} removed`);
+    } catch (err) {
+      toast.error(`Could not remove ${member.email}`);
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+      <div
+        className="absolute inset-0 bg-black bg-opacity-50 backdrop-blur-sm"
+        onClick={() => !adding && onClose()}
+      ></div>
+
+      <div className="relative bg-white rounded-3xl shadow-xl max-w-md w-full p-8 max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center space-x-3 min-w-0">
+            <Users className="w-5 h-5 text-gray-500 flex-shrink-0" />
+            <h2 className="text-xl font-medium text-gray-900 truncate">
+              Members · {room.name || "Untitled workspace"}
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="space-y-6">
+          {loading ? (
+            <div className="flex items-center justify-center space-x-2 text-gray-400 text-sm py-6">
+              <Loader className="w-4 h-4 animate-spin" />
+              <span>Loading members...</span>
+            </div>
+          ) : error ? (
+            <div className="flex items-center space-x-2 text-red-600 text-sm bg-red-50 px-4 py-3 rounded-xl border border-red-100">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{error}</span>
+              <button
+                onClick={fetchMembers}
+                title="Retry"
+                className="ml-auto text-red-400 hover:text-red-600 transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </div>
+          ) : members.length === 0 ? (
+            <p className="text-sm text-gray-400 py-2 text-center">
+              No members yet. Add someone by email below.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {members.map((member, index) => {
+                // Owner comes first in the list (and matches room.owner)
+                const isOwnerMember =
+                  member.id === room.owner ||
+                  member.email === room.owner ||
+                  index === 0;
+                return (
+                  <div
+                    key={member.id}
+                    className="flex items-center justify-between px-4 py-3 border border-gray-100 rounded-xl"
+                  >
+                    <div className="flex items-center space-x-2 min-w-0">
+                      <p className="text-sm text-gray-900 truncate">
+                        {member.email}
+                      </p>
+                      {isOwnerMember && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-xs font-medium flex-shrink-0">
+                          owner
+                        </span>
+                      )}
+                    </div>
+                    {!isOwnerMember && (
+                      <button
+                        onClick={() => handleRemoveMember(member)}
+                        disabled={removingId === member.id}
+                        title={`Remove ${member.email}`}
+                        className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200 disabled:opacity-50 flex-shrink-0"
+                      >
+                        {removingId === member.id ? (
+                          <Loader className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <X className="w-4 h-4" />
+                        )}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Add member form */}
+          <div className="pt-2 border-t border-gray-100 space-y-3">
+            <p className="text-sm font-medium text-gray-700">Add a member</p>
+            <input
+              type="email"
+              autoComplete="off"
+              value={newEmail}
+              onChange={(e) => {
+                setNewEmail(e.target.value);
+                if (addError) setAddError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && newEmail.trim() && !adding) {
+                  handleAddMember();
+                }
+              }}
+              disabled={adding}
+              placeholder="name@company.com"
+              className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-black focus:border-transparent outline-none transition-all duration-200 disabled:opacity-50"
+            />
+
+            {addError && (
+              <div className="flex items-center space-x-2 text-red-600 text-sm bg-red-50 px-4 py-3 rounded-xl border border-red-100">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span className="break-words">{addError}</span>
+              </div>
+            )}
+
+            <button
+              onClick={handleAddMember}
+              disabled={adding || !newEmail.trim()}
+              className="w-full px-6 py-3 bg-black text-white rounded-xl hover:bg-gray-800 transition-all duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+            >
+              {adding ? (
+                <>
+                  <Loader className="w-4 h-4 mr-2 animate-spin" />
+                  Adding...
+                </>
+              ) : (
+                <>
+                  <Plus className="w-4 h-4 mr-2" />
+                  Add Member
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Workspace Card Component
-const WorkspaceCard = ({ room, currentUserId, onJoin, onUpdate, onDelete }) => {
+const WorkspaceCard = ({
+  room,
+  currentUserId,
+  tokenUserId,
+  isAdmin,
+  onJoin,
+  onUpdate,
+  onDelete,
+  onOpenMembers
+}) => {
   const [changePasswordModal, setChangePasswordModal] = useState(false);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const isPublic = !room.is_private;
-  const isOwner = Boolean(currentUserId) && currentUserId === room.owner;
+  const isOwner =
+    (Boolean(currentUserId) && currentUserId === room.owner) ||
+    (Boolean(tokenUserId) && tokenUserId === room.owner);
+  const canManageMembers = isOwner || isAdmin;
+  const memberCount = Array.isArray(room.member_emails)
+    ? room.member_emails.length
+    : 0;
 
   const handleStateChange = async () => {
     if (isPublic) {
@@ -84,6 +348,15 @@ const WorkspaceCard = ({ room, currentUserId, onJoin, onUpdate, onDelete }) => {
                   <span className="text-sm font-medium">Private</span>
                 </div>
               )}
+              {memberCount > 0 && (
+                <div
+                  className="flex items-center space-x-1 text-gray-400"
+                  title={`${memberCount} member${memberCount === 1 ? "" : "s"}`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span className="text-xs font-medium">{memberCount}</span>
+                </div>
+              )}
               {room.owner && (
                 <span className="text-xs text-gray-400 truncate">
                   by {room.owner}
@@ -92,23 +365,36 @@ const WorkspaceCard = ({ room, currentUserId, onJoin, onUpdate, onDelete }) => {
             </div>
           </div>
 
-          {isOwner && (
+          {(isOwner || canManageMembers) && (
             <div className="flex items-center space-x-1">
-              <button
-                onClick={handleStateChange}
-                disabled={saving}
-                title={`Change to ${isPublic ? "private" : "public"}`}
-                className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-all duration-200 disabled:opacity-50"
-              >
-                <Settings className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => onDelete(room._id)}
-                title="Delete workspace"
-                className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {canManageMembers && (
+                <button
+                  onClick={() => onOpenMembers(room)}
+                  title="Manage members"
+                  className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-all duration-200"
+                >
+                  <Users className="w-4 h-4" />
+                </button>
+              )}
+              {isOwner && (
+                <>
+                  <button
+                    onClick={handleStateChange}
+                    disabled={saving}
+                    title={`Change to ${isPublic ? "private" : "public"}`}
+                    className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-all duration-200 disabled:opacity-50"
+                  >
+                    <Settings className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => onDelete(room._id)}
+                    title="Delete workspace"
+                    className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -222,6 +508,12 @@ export const Nodesly = () => {
   const [searchReadOnly, setSearchReadOnly] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [showJoinPassword, setShowJoinPassword] = useState(false);
+
+  // Membership: workspace whose members modal is currently open.
+  const [membersRoom, setMembersRoom] = useState(null);
+  // Role/user id from the JWT — computed once per render.
+  const tokenUserId = getTokenPayload()?.user_id || null;
+  const isAdmin = getRole() === "admin";
 
   // Multi-host: available Docker hosts (containers service). Degrades to
   // local-only when the /hosts endpoint isn't available yet.
@@ -485,6 +777,18 @@ export const Nodesly = () => {
     }
   };
 
+  // Applies a room update coming back from the members endpoints, keeping
+  // both the list and the open modal in sync (immutably).
+  const handleRoomChanged = (updatedRoom) => {
+    if (!updatedRoom || !updatedRoom._id) return;
+    setRooms((prev) =>
+      prev.map((r) => (r._id === updatedRoom._id ? { ...r, ...updatedRoom } : r))
+    );
+    setMembersRoom((prev) =>
+      prev && prev._id === updatedRoom._id ? { ...prev, ...updatedRoom } : prev
+    );
+  };
+
   const handleJoinRoom = (room) => {
     if (!room.is_private) {
       history.push(`/room/${room._id}`);
@@ -630,9 +934,12 @@ export const Nodesly = () => {
                       key={room._id}
                       room={room}
                       currentUserId={currentUserId}
+                      tokenUserId={tokenUserId}
+                      isAdmin={isAdmin}
                       onJoin={handleJoinRoom}
                       onUpdate={handleUpdateRoom}
                       onDelete={handleDeleteRoom}
+                      onOpenMembers={setMembersRoom}
                     />
                   ))}
                 </div>
@@ -655,9 +962,12 @@ export const Nodesly = () => {
                       key={room._id}
                       room={room}
                       currentUserId={currentUserId}
+                      tokenUserId={tokenUserId}
+                      isAdmin={isAdmin}
                       onJoin={handleJoinRoom}
                       onUpdate={handleUpdateRoom}
                       onDelete={handleDeleteRoom}
+                      onOpenMembers={setMembersRoom}
                     />
                   ))}
                 </div>
@@ -1038,6 +1348,15 @@ export const Nodesly = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Members Management Modal */}
+      {membersRoom && (
+        <MembersModal
+          room={membersRoom}
+          onClose={() => setMembersRoom(null)}
+          onRoomChange={handleRoomChanged}
+        />
       )}
     </div>
   );
