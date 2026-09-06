@@ -272,8 +272,8 @@ async def rollback_file_version(package_id: str, name: str, version_id: str, use
 
 @app.get("/packages/{package_id}/collaborators")
 async def get_collaborators(package_id: str, user=Depends(require_user)):
+    # Read-only visibility for everyone; mutations stay owner/admin-gated.
     package = find_package_or_404(package_id)
-    require_owner_or_admin(package, user)
     return collaborator_list(package)
 
 @app.post("/packages/{package_id}/collaborators")
