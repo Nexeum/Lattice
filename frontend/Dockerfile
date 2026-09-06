@@ -1,4 +1,4 @@
-# Stage 1: build the CRA bundle
+# Stage 1: build the Vite bundle (build.outDir is "build")
 FROM node:20-alpine AS build
 
 WORKDIR /app

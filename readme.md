@@ -20,7 +20,7 @@ Local Docker orchestration platform. Manage workspaces backed by Docker-in-Docke
 | `backend/container.py` | 5001 | Docker engine API: containers, DinD nodes, exec, metrics, topology, plugin installs, CI runs |
 | `backend/room.py` | 5002 | Workspaces CRUD (MongoDB) |
 | `backend/package.py` | 5003 | Plugin registry (MongoDB + GridFS) |
-| `frontend/` | 3000 | React dashboard (CRA + Tailwind) |
+| `frontend/` | 3000 | React dashboard (Vite + Tailwind) |
 
 > Port 5000 is intentionally avoided: macOS AirPlay Receiver occupies it.
 
@@ -41,11 +41,13 @@ cd backend
 python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 ./orquestador.sh          # or start each uvicorn service manually
 
-# Frontend
+# Frontend (Vite)
 cd frontend
 npm install
-npm start                 # http://localhost:3000
+npm run dev               # http://localhost:3000 (npm start also works)
 ```
+
+Production bundle: `npm run build` (outputs to `frontend/build/`), preview it with `npm run preview`.
 
 Register a user from the UI and sign in. Every backend service exposes Swagger docs at `/docs` (e.g. http://localhost:5001/docs).
 

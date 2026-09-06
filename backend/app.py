@@ -86,6 +86,10 @@ async def login(email: str = Body(...), password: str = Body(...)):
     else:
         raise HTTPException(status_code=401, detail='Invalid email or password')
 
+@app.post("/refresh")
+async def refresh(payload: dict = Depends(verify_token)):
+    return {'token': generate_token(payload['user_id'])}
+
 @app.post("/register")
 async def register(email: str = Body(...), password: str = Body(...)):
     if not email or not password:

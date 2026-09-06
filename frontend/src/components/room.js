@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { Cli } from './Cli';
 import { Graph } from './Graph';
 import {
@@ -12,8 +12,6 @@ import {
   X,
   RefreshCw,
   AlertCircle,
-  Boxes,
-  User,
   Cpu,
   MemoryStick,
   ArrowDownUp,
@@ -26,7 +24,32 @@ import {
   ChevronDown,
   ChevronRight
 } from 'lucide-react';
+import { Line } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Filler,
+  Tooltip as ChartTooltip
+} from 'chart.js';
 import { authHeaders, redirectIfUnauthorized } from '../lib/api';
+import { toast } from '../lib/toast';
+import {
+  publishWorkspaceInfo,
+  clearWorkspaceInfo,
+  onWorkspaceAction
+} from '../lib/workspaceBridge';
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Filler,
+  ChartTooltip
+);
 
 const ROOMS_API = 'http://localhost:5002';
 const CONTAINERS_API = 'http://localhost:5001';
@@ -62,24 +85,6 @@ const isRunning = (status) => {
   return s.startsWith('running') || s.startsWith('up');
 };
 
-const StatusBadge = ({ status }) => {
-  const running = isRunning(status);
-  return (
-    <span
-      className={`inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-        running ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
-      }`}
-    >
-      <span
-        className={`w-1.5 h-1.5 rounded-full ${
-          running ? 'bg-green-500' : 'bg-gray-400'
-        }`}
-      ></span>
-      <span>{status || 'unknown'}</span>
-    </span>
-  );
-};
-
 const MetricCard = ({ icon: Icon, label, value, sub }) => (
   <div className="bg-white/70 rounded-2xl p-4 border border-gray-100">
     <div className="flex items-center space-x-2 mb-2">
@@ -90,6 +95,50 @@ const MetricCard = ({ icon: Icon, label, value, sub }) => (
     </div>
     <p className="text-xl font-light text-gray-900 truncate">{value || '—'}</p>
     {sub ? <p className="text-xs text-gray-400 font-mono truncate mt-1">{sub}</p> : null}
+  </div>
+);
+
+const SPARKLINE_HEIGHT = 60;
+
+const SPARKLINE_OPTIONS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: false,
+  plugins: {
+    legend: { display: false },
+    tooltip: { mode: 'index', intersect: false, displayColors: false }
+  },
+  interaction: { mode: 'index', intersect: false },
+  scales: {
+    x: { display: false },
+    y: { display: false }
+  },
+  elements: { point: { radius: 0, hitRadius: 8 } }
+};
+
+const Sparkline = ({ label, labels, values, color, fillColor }) => (
+  <div className="bg-white/70 rounded-2xl p-3 border border-gray-100">
+    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+      {label}
+    </p>
+    <div style={{ height: SPARKLINE_HEIGHT }}>
+      <Line
+        data={{
+          labels,
+          datasets: [
+            {
+              data: values,
+              borderColor: color,
+              backgroundColor: fillColor,
+              borderWidth: 1.5,
+              tension: 0.3,
+              fill: true
+            }
+          ]
+        }}
+        options={SPARKLINE_OPTIONS}
+      />
+    </div>
   </div>
 );
 
@@ -131,6 +180,9 @@ export const Room = () => {
   const [metrics, setMetrics] = useState({ loading: false, error: null, data: null });
   const metricsRequestRef = useRef(0);
 
+  const [history, setHistory] = useState({ loading: false, samples: [] });
+  const historyRequestRef = useRef(0);
+
   const [openModalGraph, setOpenModalGraph] = useState(false);
   const [openModalInstall, setOpenModalInstall] = useState(false);
   const [openModalCreate, setOpenModalCreate] = useState(false);
@@ -150,6 +202,21 @@ export const Room = () => {
 
   const parentId = parent?.ID || null;
   const parentRunning = Boolean(parent && isRunning(parent.Status));
+
+  // Multi-host: rooms may carry a `host` field naming a remote Docker daemon.
+  // Absent or "local" means the local daemon (no query param).
+  const roomHost = room?.host && room.host !== 'local' ? room.host : null;
+
+  /** Append ?host=<name> to a containers-service URL when this room is remote. */
+  const withHost = useCallback(
+    (url) => {
+      if (!roomHost) return url;
+      const parsed = new URL(url);
+      parsed.searchParams.set('host', roomHost);
+      return parsed.toString();
+    },
+    [roomHost]
+  );
 
   const fetchRoom = useCallback(async () => {
     setRoomLoading(true);
@@ -178,7 +245,7 @@ export const Room = () => {
     setContainersLoading(true);
     setContainersError(null);
     try {
-      const response = await fetch(`${CONTAINERS_API}/containers`, {
+      const response = await fetch(withHost(`${CONTAINERS_API}/containers`), {
         headers: { ...authHeaders() }
       });
       if (redirectIfUnauthorized(response)) return null;
@@ -201,12 +268,19 @@ export const Room = () => {
     } finally {
       setContainersLoading(false);
     }
-  }, [parentName]);
+  }, [parentName, withHost]);
 
   useEffect(() => {
     fetchRoom();
-    fetchParent();
-  }, [fetchRoom, fetchParent]);
+  }, [fetchRoom]);
+
+  /* Look up the parent only after the room fetch settles, so the lookup
+     targets the room's host (remote daemons keep their own container list). */
+  useEffect(() => {
+    if (!roomLoading) {
+      fetchParent();
+    }
+  }, [roomLoading, fetchParent]);
 
   /** Create the Docker-in-Docker parent for this workspace. */
   const provisionParent = useCallback(async () => {
@@ -215,7 +289,7 @@ export const Room = () => {
     setProvisionError(null);
     try {
       const response = await fetch(
-        `${CONTAINERS_API}/containermain/${encodeURIComponent(parentName)}`,
+        withHost(`${CONTAINERS_API}/containermain/${encodeURIComponent(parentName)}`),
         { method: 'POST', headers: { ...authHeaders() } }
       );
       if (redirectIfUnauthorized(response)) return;
@@ -228,6 +302,8 @@ export const Room = () => {
         setProvisionError(
           'The workspace container did not appear after setup. Retry to try again.'
         );
+      } else {
+        toast.success('Workspace container ready');
       }
     } catch (err) {
       console.error('Error provisioning workspace container:', err);
@@ -237,7 +313,7 @@ export const Room = () => {
     } finally {
       setProvisioning(false);
     }
-  }, [parentName, fetchParent]);
+  }, [parentName, fetchParent, withHost]);
 
   /* Auto-provision exactly once when the room is loaded and no parent exists. */
   useEffect(() => {
@@ -258,10 +334,10 @@ export const Room = () => {
     setStarting(true);
     setStartError(null);
     try {
-      const response = await fetch(`${CONTAINERS_API}/container/${parentId}/start`, {
-        method: 'POST',
-        headers: { ...authHeaders() }
-      });
+      const response = await fetch(
+        withHost(`${CONTAINERS_API}/container/${parentId}/start`),
+        { method: 'POST', headers: { ...authHeaders() } }
+      );
       if (redirectIfUnauthorized(response)) return;
       let body = null;
       try {
@@ -285,9 +361,10 @@ export const Room = () => {
     setChildrenLoading(true);
     setChildrenError(null);
     try {
-      const response = await fetch(`${CONTAINERS_API}/containers/${nodeId}/ps`, {
-        headers: { ...authHeaders() }
-      });
+      const response = await fetch(
+        withHost(`${CONTAINERS_API}/containers/${nodeId}/ps`),
+        { headers: { ...authHeaders() } }
+      );
       if (redirectIfUnauthorized(response)) return [];
       if (!response.ok) {
         throw new Error(`ps request responded with ${response.status}`);
@@ -309,7 +386,7 @@ export const Room = () => {
     } finally {
       setChildrenLoading(false);
     }
-  }, []);
+  }, [withHost]);
 
   useEffect(() => {
     if (parentId && parentRunning) {
@@ -332,7 +409,7 @@ export const Room = () => {
     try {
       const command = `docker exec ${childId} docker ps --format "{{.ID}},{{.Names}},{{.Image}},{{.Status}}"`;
       const response = await fetch(
-        `${CONTAINERS_API}/exe/${nodeId}/${encodeURIComponent(command)}`,
+        withHost(`${CONTAINERS_API}/exe/${nodeId}/${encodeURIComponent(command)}`),
         { method: 'POST', headers: { ...authHeaders() } }
       );
       if (redirectIfUnauthorized(response)) return;
@@ -368,7 +445,7 @@ export const Room = () => {
         [childId]: { loading: false, items: [] }
       }));
     }
-  }, []);
+  }, [withHost]);
 
   const handleSelectChild = (child) => {
     const deselecting = selectedChild?.ID === child.ID;
@@ -388,7 +465,7 @@ export const Room = () => {
       if (child?.ID) {
         const command = `docker stats ${child.ID} --no-stream --format "{{json .}}"`;
         const response = await fetch(
-          `${CONTAINERS_API}/exe/${nodeId}/${encodeURIComponent(command)}`,
+          withHost(`${CONTAINERS_API}/exe/${nodeId}/${encodeURIComponent(command)}`),
           { method: 'POST', headers: { ...authHeaders() } }
         );
         if (redirectIfUnauthorized(response)) return;
@@ -410,9 +487,10 @@ export const Room = () => {
           data = {};
         }
       } else {
-        const response = await fetch(`${CONTAINERS_API}/container/${nodeId}/metrics`, {
-          headers: { ...authHeaders() }
-        });
+        const response = await fetch(
+          withHost(`${CONTAINERS_API}/container/${nodeId}/metrics`),
+          { headers: { ...authHeaders() } }
+        );
         if (redirectIfUnauthorized(response)) return;
         if (!response.ok) {
           throw new Error(`metrics request responded with ${response.status}`);
@@ -432,7 +510,7 @@ export const Room = () => {
         });
       }
     }
-  }, []);
+  }, [withHost]);
 
   useEffect(() => {
     if (parentId && parentRunning) {
@@ -441,6 +519,55 @@ export const Room = () => {
       setMetrics({ loading: false, error: null, data: null });
     }
   }, [parentId, parentRunning, selectedChild, loadMetrics]);
+
+  /**
+   * Metrics history for the sparklines. Sampled per host container, so it is
+   * only fetched for the parent (never for a selected child). Any failure —
+   * endpoint not deployed yet, network error, bad payload — hides the charts.
+   */
+  const loadHistory = useCallback(
+    async (nodeId) => {
+      const token = historyRequestRef.current + 1;
+      historyRequestRef.current = token;
+      setHistory({ loading: true, samples: [] });
+      try {
+        const response = await fetch(
+          withHost(`${CONTAINERS_API}/containers/${nodeId}/metrics/history?minutes=60`),
+          { headers: { ...authHeaders() } }
+        );
+        if (redirectIfUnauthorized(response)) return;
+        if (!response.ok) {
+          throw new Error(`history request responded with ${response.status}`);
+        }
+        const body = await response.json();
+        const samples = (Array.isArray(body?.samples) ? body.samples : [])
+          .map((s) => ({
+            ts: s?.ts,
+            cpu: Number(s?.cpu),
+            mem: Number(s?.mem)
+          }))
+          .filter((s) => Number.isFinite(s.cpu) && Number.isFinite(s.mem));
+        if (historyRequestRef.current === token) {
+          setHistory({ loading: false, samples });
+        }
+      } catch (err) {
+        // Graceful degradation: the endpoint may not exist yet.
+        console.error('Metrics history unavailable:', err);
+        if (historyRequestRef.current === token) {
+          setHistory({ loading: false, samples: [] });
+        }
+      }
+    },
+    [withHost]
+  );
+
+  useEffect(() => {
+    if (parentId && parentRunning && !selectedChild) {
+      loadHistory(parentId);
+    } else {
+      setHistory({ loading: false, samples: [] });
+    }
+  }, [parentId, parentRunning, selectedChild, loadHistory]);
 
   const openCreateModal = () => {
     setChildName('');
@@ -463,9 +590,11 @@ export const Room = () => {
     setCreationError(null);
     try {
       const response = await fetch(
-        `${CONTAINERS_API}/container/${encodeURIComponent(parentId)}/${encodeURIComponent(
-          cleanedName
-        )}/${encodeURIComponent(image)}/${encodeURIComponent(shell)}`,
+        withHost(
+          `${CONTAINERS_API}/container/${encodeURIComponent(parentId)}/${encodeURIComponent(
+            cleanedName
+          )}/${encodeURIComponent(image)}/${encodeURIComponent(shell)}`
+        ),
         { headers: { ...authHeaders() } }
       );
       if (redirectIfUnauthorized(response)) return;
@@ -482,16 +611,20 @@ export const Room = () => {
       const created = items.some((c) => c.Name === cleanedName);
       if (!created) {
         const lastLine = output.split('\n').filter(Boolean).pop() || '';
-        setCreationError(lastLine || 'Docker rejected the container.');
+        const message = lastLine || 'Docker rejected the container.';
+        setCreationError(message);
+        toast.error(`Could not create node ${cleanedName}: ${message}`);
         return;
       }
       setOpenModalCreate(false);
       setChildName('');
+      toast.success(`Node ${cleanedName} created`);
     } catch (err) {
       console.error('Error creating node inside the workspace:', err);
       setCreationError(
         'Failed to create the node. Check that the containers service is running.'
       );
+      toast.error(`Could not create node ${cleanedName}`);
     } finally {
       setCreating(false);
     }
@@ -537,8 +670,14 @@ export const Room = () => {
       ? `${CONTAINERS_API}/node/${parentId}/${selectedChild.ID}/install/${selectedPackageId}`
       : `${CONTAINERS_API}/container/${parentId}/install/${selectedPackageId}`;
 
+    const pkg = packages.find((p) => p._id === selectedPackageId);
+    const pluginLabel = pkg?.name || 'plugin';
+    const installTarget = selectedChild
+      ? selectedChild.Name || selectedChild.ID
+      : parentName;
+
     try {
-      const response = await fetch(url, {
+      const response = await fetch(withHost(url), {
         method: 'POST',
         headers: { ...authHeaders() }
       });
@@ -553,6 +692,7 @@ export const Room = () => {
         const detail =
           body?.detail || body?.error || `Install failed with status ${response.status}.`;
         setInstallResult({ ok: false, message: String(detail) });
+        toast.error(String(detail));
         return;
       }
       setInstallResult({
@@ -561,12 +701,14 @@ export const Room = () => {
         files: Array.isArray(body?.files) ? body.files : [],
         installOutput: body?.installOutput
       });
+      toast.success(`Plugin ${pluginLabel} installed in ${installTarget}`);
     } catch (err) {
       console.error('Error installing plugin:', err);
       setInstallResult({
         ok: false,
         message: 'Could not reach the install service.'
       });
+      toast.error(`Could not install ${pluginLabel}: install service unreachable`);
     } finally {
       setInstalling(false);
     }
@@ -578,6 +720,47 @@ export const Room = () => {
     : parent
     ? parentName
     : 'None';
+
+  /* Publish the workspace snapshot for the right sidebar whenever it changes. */
+  useEffect(() => {
+    publishWorkspaceInfo({
+      name: roomLabel,
+      status: parent ? parent.Status : provisioning ? 'provisioning' : 'missing',
+      running: parentRunning,
+      parentName,
+      host: room?.host,
+      childrenCount: children.length,
+      selectedLabel: selectedTargetLabel,
+      owner: room?.owner
+    });
+  }, [
+    roomLabel,
+    parent,
+    provisioning,
+    parentRunning,
+    parentName,
+    room,
+    children.length,
+    selectedTargetLabel
+  ]);
+
+  /* Clear the sidebar snapshot when leaving the page. */
+  useEffect(() => () => clearWorkspaceInfo(), []);
+
+  /* React to actions triggered from the sidebar's Workspace card. */
+  useEffect(() => {
+    const unsubscribe = onWorkspaceAction((action) => {
+      if (action === 'network') {
+        setOpenModalGraph(true);
+      }
+      if (action === 'create-node' && parentRunning) {
+        setChildName('');
+        setCreationError(null);
+        setOpenModalCreate(true);
+      }
+    });
+    return unsubscribe;
+  }, [parentRunning]);
 
   if (roomLoading && containersLoading) {
     return (
@@ -687,110 +870,29 @@ export const Room = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 pt-16">
       <div className="max-w-7xl mx-auto px-6 py-8">
-        {/* Header */}
-        <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-lg border border-white/20 p-8 mb-8">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center space-x-4">
-              <div className="w-14 h-14 bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 rounded-2xl flex items-center justify-center shadow-lg">
-                <Server className="w-7 h-7 text-white" />
-              </div>
-              <div>
-                <div className="flex items-center space-x-3">
-                  <h1 className="text-3xl font-light text-gray-900 tracking-tight">
-                    {room?.name || (roomError ? 'Workspace' : 'Loading...')}
-                  </h1>
-                  {parent && <StatusBadge status={parent.Status} />}
-                </div>
-                <p className="text-gray-500 font-medium">
-                  Lattice — Workspace
-                  {room?.owner ? ` · owned by ${room.owner}` : ''}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center space-x-3">
-              <button
-                onClick={() => setOpenModalGraph(true)}
-                className="flex items-center space-x-2 px-5 py-2.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-2xl transition-all duration-300 backdrop-blur-sm border border-gray-200/50"
-              >
-                <Network className="w-4 h-4" />
-                <span className="font-medium">Network View</span>
-              </button>
-
-              {parentRunning && (
-                <button
-                  onClick={openCreateModal}
-                  className="flex items-center space-x-2 px-6 py-3 bg-black text-white rounded-2xl hover:bg-gray-800 hover:shadow-lg transition-all duration-300 font-medium shadow-md"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Create Node</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {roomError && (
-            <div className="flex items-center space-x-2 text-red-600 text-sm bg-red-50 px-4 py-3 rounded-xl border border-red-100 mb-6">
-              <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              <span>{roomError}</span>
-              <button
-                onClick={fetchRoom}
-                className="ml-auto flex items-center space-x-1 text-red-500 hover:text-red-700 font-medium transition-colors"
-              >
-                <RefreshCw className="w-4 h-4" />
-                <span>Retry</span>
-              </button>
-            </div>
-          )}
-
-          {/* Stats */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            <div className="bg-gradient-to-br from-blue-50 to-blue-100/50 rounded-2xl p-5 border border-blue-200/30">
-              <div className="flex items-center space-x-2 mb-3">
-                <Server className="w-5 h-5 text-blue-600" />
-                <span className="text-sm font-semibold text-blue-800">Workspace</span>
-              </div>
-              <p className="text-lg font-medium text-blue-900">
-                {parent
-                  ? parentRunning
-                    ? 'Running'
-                    : 'Stopped'
-                  : provisioning
-                  ? 'Provisioning…'
-                  : 'Not ready'}
-              </p>
-              <p className="text-xs text-blue-700/60 font-mono truncate mt-1">{parentName}</p>
-            </div>
-
-            <div className="bg-gradient-to-br from-green-50 to-green-100/50 rounded-2xl p-5 border border-green-200/30">
-              <div className="flex items-center space-x-2 mb-3">
-                <Boxes className="w-5 h-5 text-green-600" />
-                <span className="text-sm font-semibold text-green-800">Containers</span>
-              </div>
-              <p className="text-3xl font-light text-green-900">{children.length}</p>
-            </div>
-
-            <div className="bg-gradient-to-br from-purple-50 to-purple-100/50 rounded-2xl p-5 border border-purple-200/30">
-              <div className="flex items-center space-x-2 mb-3">
-                <Terminal className="w-5 h-5 text-purple-600" />
-                <span className="text-sm font-semibold text-purple-800">Selected</span>
-              </div>
-              <p className="text-lg font-medium text-purple-900 font-mono truncate">
-                {selectedTargetLabel}
-              </p>
-            </div>
-
-            <div className="bg-gradient-to-br from-orange-50 to-orange-100/50 rounded-2xl p-5 border border-orange-200/30">
-              <div className="flex items-center space-x-2 mb-3">
-                <User className="w-5 h-5 text-orange-600" />
-                <span className="text-sm font-semibold text-orange-800">Owner</span>
-              </div>
-              <p className="text-lg font-medium text-orange-900 truncate">
-                {room?.owner || 'Unknown'}
-              </p>
-            </div>
-          </div>
+        {/* Slim breadcrumb: workspace details now live in the right sidebar */}
+        <div className="mb-6">
+          <Link
+            to="/nodesly"
+            className="inline-flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors"
+          >
+            ← Workspaces
+          </Link>
         </div>
+
+        {roomError && (
+          <div className="flex items-center space-x-2 text-red-600 text-sm bg-red-50 px-4 py-3 rounded-xl border border-red-100 mb-6">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <span>{roomError}</span>
+            <button
+              onClick={fetchRoom}
+              className="ml-auto flex items-center space-x-1 text-red-500 hover:text-red-700 font-medium transition-colors"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>Retry</span>
+            </button>
+          </div>
+        )}
 
         {lifecycleCard ? (
           lifecycleCard
@@ -962,7 +1064,10 @@ export const Room = () => {
                       <span>Install Plugin</span>
                     </button>
                     <button
-                      onClick={() => loadMetrics(parentId, selectedChild)}
+                      onClick={() => {
+                        loadMetrics(parentId, selectedChild);
+                        if (parentId && !selectedChild) loadHistory(parentId);
+                      }}
                       disabled={metrics.loading}
                       title="Refresh metrics"
                       className="w-9 h-9 flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-all duration-200 disabled:opacity-50"
@@ -1006,6 +1111,39 @@ export const Room = () => {
                     <MetricCard icon={Hash} label="PIDs" value={memData.PIDs} />
                   </div>
                 )}
+
+                {/* History sparklines: parent-only, hidden when no data. */}
+                {!selectedChild && history.samples.length > 1 && (
+                  <div className="mt-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <Sparkline
+                        label="CPU %"
+                        labels={history.samples.map((s) =>
+                          new Date(s.ts).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })
+                        )}
+                        values={history.samples.map((s) => s.cpu)}
+                        color="#000000"
+                        fillColor="rgba(0, 0, 0, 0.06)"
+                      />
+                      <Sparkline
+                        label="Memory %"
+                        labels={history.samples.map((s) =>
+                          new Date(s.ts).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })
+                        )}
+                        values={history.samples.map((s) => s.mem)}
+                        color="#9ca3af"
+                        fillColor="rgba(156, 163, 175, 0.18)"
+                      />
+                    </div>
+                    <p className="text-xs text-gray-400 mt-2 text-right">last hour</p>
+                  </div>
+                )}
               </div>
 
               {/* Terminal Section */}
@@ -1026,6 +1164,7 @@ export const Room = () => {
                     key={parentId}
                     containerId={parentId}
                     innerContainerId={selectedChild?.ID || undefined}
+                    host={room?.host}
                   />
                 </div>
               </div>
