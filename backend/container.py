@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import json
 import io
@@ -10,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket, WebSocke
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 import docker
+import gridfs
 import psutil
 import requests
 import time
@@ -383,14 +385,81 @@ async def install_package_nested(outer_container_id: str, inner_container_id: st
         raise HTTPException(status_code=500, detail={'error': 'Failed to install package', 'message': str(e)})
 
 # ---------------------------------------------------------------------------
+# Stacks (deploy a multi-service template into a workspace parent)
+# ---------------------------------------------------------------------------
+
+STACK_MAX_SERVICES = 10
+STACK_NAME_SANITIZE_RE = re.compile(r"[^a-z0-9-]")
+
+def parse_stack_services(files):
+    """Validate a stack plugin's stack.json: {"services": [{"name", "image",
+    "shell"?}]}. Names are sanitized to [a-z0-9-]; raises 400 on anything
+    malformed."""
+    by_name = {f["name"]: f for f in files}
+    stack_file = by_name.get("stack.json")
+    if not stack_file or not stack_file.get("content"):
+        raise HTTPException(status_code=400, detail="Package has no stack.json")
+    try:
+        parsed = json.loads(stack_file["content"])
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: {e}")
+    services = parsed.get("services") if isinstance(parsed, dict) else None
+    if not isinstance(services, list) or not services:
+        raise HTTPException(status_code=400, detail="Invalid stack.json: services must be a non-empty list")
+    if len(services) > STACK_MAX_SERVICES:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: at most {STACK_MAX_SERVICES} services allowed")
+    validated = []
+    for service in services:
+        if not isinstance(service, dict):
+            raise HTTPException(status_code=400, detail="Invalid stack.json: each service must be an object")
+        name = STACK_NAME_SANITIZE_RE.sub("", str(service.get("name") or "").lower())
+        image = str(service.get("image") or "").strip()
+        shell = str(service.get("shell") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Invalid stack.json: each service needs a name ([a-z0-9-])")
+        if not image:
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} has no image")
+        validated.append({"name": name, "image": image, "shell": shell})
+    return validated
+
+def deploy_stack_service(parent, service):
+    """docker run one service inside the parent; never raises."""
+    command = f"docker run -dit --privileged --name {service['name']} {service['image']}"
+    if service["shell"]:
+        command += f" {service['shell']}"
+    try:
+        exec_result = parent.exec_run(f"sh -c '{command}'", privileged=True)
+        output = exec_result.output.decode("utf-8", errors="replace").strip()
+        last_line = output.splitlines()[-1].strip() if output else ""
+        ok = exec_result.exit_code == 0 and "error" not in last_line.lower()
+        return {"name": service["name"], "ok": ok, "output": last_line}
+    except Exception as e:
+        return {"name": service["name"], "ok": False, "output": str(e)}
+
+@app.post("/container/{parent_id}/stack/{package_id}")
+async def deploy_stack(parent_id: str, package_id: str, host: str = None, user=Depends(require_user), authorization: str = Header(None)):
+    try:
+        package, files = fetch_package_or_404(package_id, authorization)
+        services = parse_stack_services(files)
+        parent = get_client(host).containers.get(parent_id)
+        return {"deployed": [deploy_stack_service(parent, service) for service in services]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to deploy stack', 'message': str(e)})
+
+# ---------------------------------------------------------------------------
 # CI runs (GitHub-Actions-style pipelines for plugins)
 # ---------------------------------------------------------------------------
 
 ci_db = MongoClient(MONGO_URL)['kubehub']
 ci_runs = ci_db['ci_runs']
+artifacts_fs = gridfs.GridFS(ci_db, collection="ci_artifacts")
 
 CI_IMAGE = "alpine:3.19"
 CI_STEP_TIMEOUT_SECONDS = 120
+CI_ARTIFACT_MAX_FILE_BYTES = 10 * 1024 * 1024
+CI_ARTIFACT_MAX_FILES = 20
 CI_CONCURRENCY = int(os.environ.get("LATTICE_CI_CONCURRENCY", "2"))
 CI_ACTIVE_STATUSES = {"queued", "starting", "running"}
 CI_WORKER_IDLE_SLEEP_SECONDS = 1
@@ -476,6 +545,34 @@ def execute_ci_step(runner, run_id, workdir, index, step):
     )
     return step_status
 
+def capture_ci_artifacts(runner, run):
+    """Capture whatever the run's steps left in /work/<pkg>/artifacts into
+    GridFS (regular files <= 10 MB, capped at 20) and $set the manifest on the
+    run doc. Runs on success AND failure — failed builds' dumps are gold.
+    Missing directory means no artifacts; never raises."""
+    try:
+        bits, _ = runner.get_archive(f"/work/{run['package_name']}/artifacts")
+        archive = io.BytesIO(b"".join(bits))
+        artifacts = []
+        with tarfile.open(fileobj=archive) as tar:
+            for member in tar.getmembers():
+                if len(artifacts) >= CI_ARTIFACT_MAX_FILES:
+                    break
+                if not member.isreg() or member.size > CI_ARTIFACT_MAX_FILE_BYTES:
+                    continue
+                relative_name = member.name.split("/", 1)[1] if "/" in member.name else member.name
+                if not relative_name:
+                    continue
+                data = tar.extractfile(member).read()
+                gridfs_id = artifacts_fs.put(
+                    data, filename=relative_name, metadata={"run_id": str(run["_id"])},
+                )
+                artifacts.append({"id": str(gridfs_id), "name": relative_name, "size": len(data)})
+        if artifacts:
+            ci_runs.update_one({"_id": run["_id"]}, {"$set": {"artifacts": artifacts}})
+    except Exception:
+        pass
+
 def post_ci_webhook(run, status, finished_at):
     """Best-effort notification at the end of a run. No-op unless
     LATTICE_CI_WEBHOOK_URL is set; never raises."""
@@ -518,6 +615,7 @@ def execute_ci_run(run):
         ci_runs.update_one({"_id": run_id}, {"$set": {"error": str(e)}})
     finally:
         if runner is not None:
+            capture_ci_artifacts(runner, run)
             try:
                 runner.remove(force=True)
             except Exception:
@@ -672,6 +770,23 @@ async def stream_ci_run(run_id: str, user=Depends(require_user_query)):
         gen(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
+    )
+
+@app.get("/ci/runs/{run_id}/artifacts/{artifact_id}")
+async def download_ci_artifact(run_id: str, artifact_id: str, user=Depends(require_user_query)):
+    """Download one captured artifact (?token= auth so browsers can use plain
+    links)."""
+    try:
+        grid_out = artifacts_fs.get(ObjectId(artifact_id))
+    except Exception:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if (grid_out.metadata or {}).get("run_id") != run_id:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    filename = (grid_out.filename or "artifact").replace('"', "")
+    return StreamingResponse(
+        grid_out,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1072,79 @@ async def terminal_websocket(websocket: WebSocket, container_id: str, token: str
         reader.cancel()
         try:
             sock.close()
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=1000)
+        except Exception:
+            pass
+
+@app.websocket("/ws/logs/{container_id}")
+async def logs_websocket(websocket: WebSocket, container_id: str, token: str = None, inner: str = None, host: str = None):
+    try:
+        decode_token(token or "")
+    except Exception:
+        await websocket.close(code=4401)
+        return
+    try:
+        docker_client = get_client(host)
+        ws_api_client = get_api_client(host)
+    except Exception:
+        await websocket.close(code=4404)
+        return
+    await websocket.accept()
+
+    stream = None
+    try:
+        if inner:
+            exec_id = ws_api_client.exec_create(
+                container_id,
+                ["docker", "logs", "-f", "--tail", "200", inner],
+                tty=False, stdin=False,
+            )
+            stream = ws_api_client.exec_start(exec_id, stream=True)
+        else:
+            stream = docker_client.containers.get(container_id).logs(
+                stream=True, follow=True, tail=200, timestamps=False,
+            )
+    except Exception as e:
+        try:
+            await websocket.send_text(f"error: {e}\n")
+        except Exception:
+            pass
+        await websocket.close(code=1000)
+        return
+
+    loop = asyncio.get_running_loop()
+
+    async def pump_logs():
+        """Both branches yield a blocking chunk generator; drain it off the
+        event loop and forward each chunk as a text frame."""
+        try:
+            while True:
+                chunk = await loop.run_in_executor(None, next, stream, None)
+                if chunk is None:
+                    break
+                await websocket.send_text(chunk.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=1000)
+        except Exception:
+            pass
+
+    reader = asyncio.ensure_future(pump_logs())
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        reader.cancel()
+        try:
+            stream.close()
         except Exception:
             pass
         try:

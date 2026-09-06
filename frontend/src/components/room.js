@@ -22,7 +22,11 @@ import {
   Container,
   CornerDownRight,
   ChevronDown,
-  ChevronRight
+  ChevronRight,
+  Layers,
+  ScrollText,
+  CheckCircle,
+  XCircle
 } from 'lucide-react';
 import { Line } from 'react-chartjs-2';
 import {
@@ -34,7 +38,7 @@ import {
   Filler,
   Tooltip as ChartTooltip
 } from 'chart.js';
-import { authHeaders, redirectIfUnauthorized } from '../lib/api';
+import { authHeaders, redirectIfUnauthorized, getToken } from '../lib/api';
 import { toast } from '../lib/toast';
 import {
   publishWorkspaceInfo,
@@ -142,6 +146,231 @@ const Sparkline = ({ label, labels, values, color, fillColor }) => (
   </div>
 );
 
+/* ---------------------------------------------------------------- Logs --- */
+
+const LOGS_WS_BASE = 'ws://localhost:5001';
+const MAX_LOG_LINES = 2000;
+const LOGS_STICKY_THRESHOLD_PX = 40;
+const WS_CLOSE_UNAUTHORIZED = 4401;
+
+const shortId = (value) => (typeof value === 'string' ? value.slice(0, 12) : '');
+
+const buildLogsWsUrl = (containerId, innerContainerId, host) => {
+  const params = new URLSearchParams({ token: getToken() });
+  if (innerContainerId) params.set('inner', innerContainerId);
+  if (host && host !== 'local') params.set('host', host);
+  return `${LOGS_WS_BASE}/ws/logs/${encodeURIComponent(containerId)}?${params.toString()}`;
+};
+
+/**
+ * Append a raw text chunk to an immutable line buffer. The last element may
+ * be a partial line that the next chunk completes. Oldest lines are dropped
+ * past MAX_LOG_LINES.
+ */
+const appendLogChunk = (lines, chunk) => {
+  const last = lines.length > 0 ? lines[lines.length - 1] : '';
+  const pieces = (last + chunk).split('\n');
+  const merged = [...lines.slice(0, -1), ...pieces];
+  return merged.length > MAX_LOG_LINES
+    ? merged.slice(merged.length - MAX_LOG_LINES)
+    : merged;
+};
+
+/**
+ * Live container log stream. Same black chrome as the Cli panel; follows the
+ * current target (parent or selected child) and reconnects from scratch when
+ * the target changes.
+ */
+const LogsPanel = ({ containerId, innerContainerId, host, label }) => {
+  const [lines, setLines] = useState([]);
+  const [status, setStatus] = useState('connecting'); // connecting | live | ended | error
+  const [endNote, setEndNote] = useState(null);
+  const [attempt, setAttempt] = useState(0);
+
+  const scrollRef = useRef(null);
+  const stickToBottomRef = useRef(true);
+  const wsRef = useRef(null);
+
+  useEffect(() => {
+    setLines([]);
+    setEndNote(null);
+    stickToBottomRef.current = true;
+
+    if (!containerId) {
+      setStatus('error');
+      setEndNote('No container attached. Logs cannot be streamed.');
+      return undefined;
+    }
+    setStatus('connecting');
+
+    let ws;
+    try {
+      ws = new WebSocket(buildLogsWsUrl(containerId, innerContainerId, host));
+    } catch (err) {
+      console.error('Logs socket open failed:', err);
+      setStatus('error');
+      setEndNote('Could not open the log stream.');
+      return undefined;
+    }
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      if (wsRef.current !== ws) return;
+      setStatus('live');
+    };
+
+    ws.onmessage = (event) => {
+      if (wsRef.current !== ws) return;
+      if (typeof event.data === 'string') {
+        setLines((prev) => appendLogChunk(prev, event.data));
+      }
+    };
+
+    ws.onerror = (event) => {
+      console.error('Logs socket error:', event);
+    };
+
+    ws.onclose = (event) => {
+      if (wsRef.current !== ws) return;
+      wsRef.current = null;
+      if (event.code === WS_CLOSE_UNAUTHORIZED) {
+        setStatus('error');
+        setEndNote('session expired — refresh and sign in');
+      } else {
+        setStatus('ended');
+        setEndNote('stream ended');
+      }
+    };
+
+    return () => {
+      wsRef.current = null;
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      try {
+        ws.close(1000);
+      } catch (err) {
+        console.error('Logs socket close failed:', err);
+      }
+    };
+  }, [containerId, innerContainerId, host, attempt]);
+
+  /* Auto-scroll to the bottom unless the user scrolled up to read history. */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [lines, status]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < LOGS_STICKY_THRESHOLD_PX;
+  };
+
+  const disconnected = status === 'ended' || status === 'error';
+
+  return (
+    <div className="bg-black rounded-2xl overflow-hidden flex flex-col h-full w-full">
+      {/* Header */}
+      <div className="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-gray-800">
+        <div className="flex items-center space-x-3 min-w-0">
+          <div className="flex items-center space-x-2">
+            <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+            <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
+            <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+          </div>
+          <div className="flex items-center space-x-2 min-w-0">
+            <ScrollText className="w-4 h-4 text-gray-400 flex-shrink-0" />
+            <span className="text-sm font-medium text-gray-400 font-mono truncate">
+              logs — {label || shortId(containerId) || 'no target'}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center space-x-3 flex-shrink-0">
+          {status === 'live' && (
+            <span className="flex items-center space-x-1.5 text-xs text-green-400 font-mono">
+              <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+              <span>Live</span>
+            </span>
+          )}
+          {status === 'connecting' && (
+            <span className="flex items-center space-x-1.5 text-xs text-gray-500 font-mono">
+              <Loader className="w-3 h-3 animate-spin" />
+              <span>connecting</span>
+            </span>
+          )}
+          {disconnected && containerId && (
+            <button
+              onClick={() => setAttempt((prev) => prev + 1)}
+              className="flex items-center space-x-1 text-xs text-gray-400 hover:text-gray-200 font-mono transition-colors"
+              title="Reconnect log stream"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>reconnect</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Scrollback */}
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 min-h-0 overflow-y-auto px-4 py-3 font-mono text-[12.5px] leading-relaxed text-gray-300 whitespace-pre-wrap break-words"
+      >
+        {lines.length === 0 && status === 'live' && (
+          <span className="text-gray-600">waiting for log output…</span>
+        )}
+        {lines.join('\n')}
+        {endNote && (
+          <div
+            className={`mt-2 ${status === 'error' ? 'text-red-400' : 'text-gray-500'}`}
+          >
+            — {endNote} —
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* --------------------------------------------------------------- Stacks --- */
+
+/** True when a registry package ships a stack.json (files may be strings or objects). */
+const isStackPackage = (pkg) =>
+  Array.isArray(pkg?.files) &&
+  pkg.files.some((file) => file === 'stack.json' || file?.name === 'stack.json');
+
+/**
+ * Best-effort client-side parse of a package's stack.json services list.
+ * Returns an array of { name, image } or null when the content is not
+ * available/parseable (deploy still proceeds server-side).
+ */
+const parseStackServices = (pkg) => {
+  const file = (pkg?.files || []).find((f) => f?.name === 'stack.json');
+  if (!file || typeof file.content !== 'string') return null;
+  try {
+    const parsed = JSON.parse(file.content);
+    if (!Array.isArray(parsed?.services)) return null;
+    return parsed.services
+      .map((service) => ({
+        name: String(service?.name || ''),
+        image: String(service?.image || '')
+      }))
+      .filter((service) => service.name);
+  } catch (err) {
+    console.error('Could not parse stack.json content:', err);
+    return null;
+  }
+};
+
+const STACK_JSON_EXAMPLE =
+  '{"services":[{"name":"redis","image":"redis:alpine"}]}';
+
 /** Full-width card used for the provisioning / stopped / error lifecycle states. */
 const LifecycleCard = ({ children }) => (
   <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-lg border border-white/20 p-12">
@@ -199,6 +428,13 @@ export const Room = () => {
   const [selectedPackageId, setSelectedPackageId] = useState('');
   const [installing, setInstalling] = useState(false);
   const [installResult, setInstallResult] = useState(null);
+
+  const [panelView, setPanelView] = useState('terminal'); // 'terminal' | 'logs'
+
+  const [openModalDeploy, setOpenModalDeploy] = useState(false);
+  const [selectedStackId, setSelectedStackId] = useState('');
+  const [deploying, setDeploying] = useState(false);
+  const [deployResult, setDeployResult] = useState(null);
 
   const parentId = parent?.ID || null;
   const parentRunning = Boolean(parent && isRunning(parent.Status));
@@ -714,6 +950,75 @@ export const Room = () => {
     }
   };
 
+  const openDeployModal = () => {
+    setDeployResult(null);
+    setSelectedStackId('');
+    setOpenModalDeploy(true);
+    fetchPackages();
+  };
+
+  const stackPackages = packages.filter(isStackPackage);
+  const selectedStackPkg =
+    stackPackages.find((pkg) => pkg._id === selectedStackId) || null;
+  const selectedStackServices = selectedStackPkg
+    ? parseStackServices(selectedStackPkg)
+    : null;
+
+  /** Deploy every service of a stack plugin inside the workspace parent. */
+  const deployStack = async () => {
+    if (!parentId || !selectedStackId) return;
+
+    setDeploying(true);
+    setDeployResult(null);
+    const stackLabel = selectedStackPkg?.name || 'stack';
+
+    try {
+      const response = await fetch(
+        withHost(`${CONTAINERS_API}/container/${parentId}/stack/${selectedStackId}`),
+        { method: 'POST', headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (parseErr) {
+        console.error('Could not parse deploy response:', parseErr);
+      }
+      if (!response.ok) {
+        const detail =
+          body?.detail || body?.error || `Deploy failed with status ${response.status}.`;
+        setDeployResult({ ok: false, message: String(detail), deployed: [] });
+        toast.error(String(detail));
+        return;
+      }
+      const deployed = Array.isArray(body?.deployed) ? body.deployed : [];
+      const okCount = deployed.filter((service) => service?.ok).length;
+      setDeployResult({ ok: true, message: null, deployed });
+      // Children changed inside the parent — refresh the panel (and, through
+      // it, the workspace bridge children count).
+      await fetchChildren(parentId);
+      if (deployed.length > 0 && okCount === deployed.length) {
+        toast.success(
+          `Stack ${stackLabel} deployed (${okCount}/${deployed.length} services)`
+        );
+      } else {
+        toast.error(
+          `Stack ${stackLabel} deployed with failures (${okCount}/${deployed.length} services)`
+        );
+      }
+    } catch (err) {
+      console.error('Error deploying stack:', err);
+      setDeployResult({
+        ok: false,
+        message: 'Could not reach the deploy service.',
+        deployed: []
+      });
+      toast.error(`Could not deploy ${stackLabel}: deploy service unreachable`);
+    } finally {
+      setDeploying(false);
+    }
+  };
+
   const roomLabel = room?.name || parentName;
   const selectedTargetLabel = selectedChild
     ? selectedChild.Name || selectedChild.ID
@@ -1064,6 +1369,13 @@ export const Room = () => {
                       <span>Install Plugin</span>
                     </button>
                     <button
+                      onClick={openDeployModal}
+                      className="flex items-center space-x-2 px-4 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl transition-all duration-200 text-sm font-medium border border-gray-200/70"
+                    >
+                      <Layers className="w-4 h-4" />
+                      <span>Deploy Stack</span>
+                    </button>
+                    <button
                       onClick={() => {
                         loadMetrics(parentId, selectedChild);
                         if (parentId && !selectedChild) loadHistory(parentId);
@@ -1146,12 +1458,38 @@ export const Room = () => {
                 )}
               </div>
 
-              {/* Terminal Section */}
+              {/* Terminal / Logs Section */}
               <div>
                 <div className="flex items-center justify-between mb-3 px-1">
-                  <div className="flex items-center space-x-2">
-                    <Terminal className="w-4 h-4 text-gray-500" />
-                    <span className="text-sm font-semibold text-gray-700">Terminal</span>
+                  <div className="flex items-center space-x-3">
+                    {panelView === 'logs' ? (
+                      <ScrollText className="w-4 h-4 text-gray-500" />
+                    ) : (
+                      <Terminal className="w-4 h-4 text-gray-500" />
+                    )}
+                    {/* Segmented control: Terminal / Logs */}
+                    <div className="flex items-center bg-gray-100 rounded-xl p-0.5">
+                      <button
+                        onClick={() => setPanelView('terminal')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                          panelView === 'terminal'
+                            ? 'bg-white text-gray-900 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                        }`}
+                      >
+                        Terminal
+                      </button>
+                      <button
+                        onClick={() => setPanelView('logs')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                          panelView === 'logs'
+                            ? 'bg-white text-gray-900 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                        }`}
+                      >
+                        Logs
+                      </button>
+                    </div>
                   </div>
                   <span className="text-sm text-gray-500 font-mono truncate">
                     {roomLabel}
@@ -1160,12 +1498,21 @@ export const Room = () => {
                 </div>
 
                 <div className="h-[28rem]">
-                  <Cli
-                    key={parentId}
-                    containerId={parentId}
-                    innerContainerId={selectedChild?.ID || undefined}
-                    host={room?.host}
-                  />
+                  {panelView === 'logs' ? (
+                    <LogsPanel
+                      containerId={parentId}
+                      innerContainerId={selectedChild?.ID || undefined}
+                      host={room?.host}
+                      label={selectedTargetLabel}
+                    />
+                  ) : (
+                    <Cli
+                      key={parentId}
+                      containerId={parentId}
+                      innerContainerId={selectedChild?.ID || undefined}
+                      host={room?.host}
+                    />
+                  )}
                 </div>
               </div>
             </div>
@@ -1434,6 +1781,204 @@ export const Room = () => {
                 <button
                   onClick={() => setOpenModalInstall(false)}
                   disabled={installing}
+                  className="px-6 py-3 bg-white/50 border border-gray-200 text-gray-700 rounded-2xl hover:bg-white transition-all duration-200 font-semibold backdrop-blur-sm disabled:opacity-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deploy Stack Modal */}
+      {openModalDeploy && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-md"
+            onClick={() => !deploying && setOpenModalDeploy(false)}
+          ></div>
+
+          <div className="relative bg-white/95 backdrop-blur-xl rounded-3xl shadow-2xl max-w-lg w-full p-8 border border-white/20 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-semibold text-gray-900">Deploy Stack</h2>
+              <button
+                onClick={() => setOpenModalDeploy(false)}
+                disabled={deploying}
+                className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-all duration-200 disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-6">
+              <div className="p-4 bg-gray-50/80 rounded-2xl border border-gray-200/50 text-sm">
+                <span className="text-gray-500">Deploy target: </span>
+                <span className="font-mono font-medium text-gray-900">
+                  workspace {parentName}
+                </span>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="stackSelect"
+                  className="block text-sm font-semibold text-gray-700 mb-2"
+                >
+                  Stack plugin
+                </label>
+                {packagesLoading ? (
+                  <div className="flex items-center space-x-2 text-gray-400 text-sm py-3">
+                    <Loader className="w-4 h-4 animate-spin" />
+                    <span>Loading plugins...</span>
+                  </div>
+                ) : packagesError ? (
+                  <div className="flex items-center justify-between text-sm text-red-500 py-2">
+                    <span>{packagesError}</span>
+                    <button
+                      onClick={fetchPackages}
+                      className="ml-3 text-red-500 hover:text-red-700"
+                      title="Retry"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : stackPackages.length === 0 ? (
+                  <div className="text-sm text-gray-500 space-y-2 py-2">
+                    <p>
+                      No stack plugins yet. A stack is a plugin with a{' '}
+                      <span className="font-mono">stack.json</span> file:
+                    </p>
+                    <code className="block bg-gray-900 text-gray-100 text-xs font-mono px-4 py-2 rounded-xl overflow-x-auto whitespace-pre">
+                      {STACK_JSON_EXAMPLE}
+                    </code>
+                  </div>
+                ) : (
+                  <select
+                    id="stackSelect"
+                    value={selectedStackId}
+                    onChange={(e) => {
+                      setSelectedStackId(e.target.value);
+                      setDeployResult(null);
+                    }}
+                    disabled={deploying}
+                    className="w-full px-4 py-3 bg-white/50 border border-gray-200 rounded-2xl focus:ring-2 focus:ring-black/20 focus:border-black/50 outline-none transition-all duration-200 disabled:opacity-50"
+                  >
+                    <option value="">Select a stack...</option>
+                    {stackPackages.map((pkg) => (
+                      <option key={pkg._id} value={pkg._id}>
+                        {pkg.name}
+                        {pkg.version ? ` — v${pkg.version}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {/* Service list preview (parsed client-side when content is available) */}
+              {selectedStackPkg && (
+                <div className="p-4 bg-gray-50/80 rounded-2xl border border-gray-200/50 text-sm">
+                  {selectedStackServices && selectedStackServices.length > 0 ? (
+                    <>
+                      <p className="text-gray-500 mb-2">
+                        Services in this stack ({selectedStackServices.length}):
+                      </p>
+                      <ul className="space-y-1">
+                        {selectedStackServices.map((service) => (
+                          <li
+                            key={service.name}
+                            className="flex items-center justify-between font-mono text-xs text-gray-700"
+                          >
+                            <span className="font-medium truncate">{service.name}</span>
+                            <span className="text-gray-400 truncate ml-3">
+                              {service.image || '?'}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : (
+                    <p className="text-gray-500">
+                      Service list unavailable — the stack.json will be read on the
+                      server during deploy.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {deployResult && !deployResult.ok && (
+                <div className="p-4 rounded-2xl border text-sm bg-red-50 border-red-100 text-red-600 whitespace-pre-wrap break-words">
+                  {deployResult.message}
+                </div>
+              )}
+
+              {deployResult && deployResult.ok && (
+                <div className="p-4 rounded-2xl border text-sm bg-gray-50/80 border-gray-200/50 space-y-2">
+                  <p className="text-gray-900 font-medium">Deploy finished.</p>
+                  {deployResult.deployed.length === 0 ? (
+                    <p className="text-gray-500">No services were reported.</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {deployResult.deployed.map((service, index) => (
+                        <li
+                          key={`${service?.name || 'service'}-${index}`}
+                          className="text-sm"
+                        >
+                          <div className="flex items-center space-x-2">
+                            {service?.ok ? (
+                              <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+                            ) : (
+                              <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                            )}
+                            <span className="font-mono font-medium text-gray-800 truncate">
+                              {service?.name || 'service'}
+                            </span>
+                          </div>
+                          {service?.output && (
+                            <p className="text-xs text-gray-400 font-mono truncate mt-0.5 pl-6">
+                              {String(service.output).split('\n').filter(Boolean).pop()}
+                            </p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {deploying && (
+                <div className="flex items-center space-x-2 text-gray-500 text-sm">
+                  <Loader className="w-4 h-4 animate-spin flex-shrink-0" />
+                  <span>
+                    Deploying{' '}
+                    {selectedStackServices && selectedStackServices.length > 0
+                      ? `${selectedStackServices.length} services`
+                      : 'stack'}
+                    … this can take a while, images pull inside the node.
+                  </span>
+                </div>
+              )}
+
+              <div className="flex space-x-3 pt-2">
+                <button
+                  onClick={deployStack}
+                  disabled={deploying || !selectedStackId || !parentId}
+                  className="flex-1 px-6 py-3 bg-black text-white rounded-2xl hover:bg-gray-800 hover:shadow-lg focus:ring-2 focus:ring-black/20 focus:ring-offset-2 transition-all duration-200 font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center shadow-md"
+                >
+                  {deploying ? (
+                    <>
+                      <Loader className="w-4 h-4 mr-2 animate-spin" />
+                      Deploying...
+                    </>
+                  ) : (
+                    <>
+                      <Layers className="w-4 h-4 mr-2" />
+                      Deploy
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => setOpenModalDeploy(false)}
+                  disabled={deploying}
                   className="px-6 py-3 bg-white/50 border border-gray-200 text-gray-700 rounded-2xl hover:bg-white transition-all duration-200 font-semibold backdrop-blur-sm disabled:opacity-50"
                 >
                   Close

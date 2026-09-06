@@ -17,10 +17,15 @@ import { Home } from "./components/Home";
 import { PublicNavbar } from "./components/PublicNavbar";
 import { Toasts } from "./components/Toasts";
 import ApiDocumentation from './components/Api';
+import { CommandPalette } from "./components/CommandPalette";
 import { startTokenRefresh } from "./lib/api";
+import { initTheme } from "./lib/theme";
 
 
 import "./App.css";
+
+// Apply the stored theme before the first paint of the app tree.
+initTheme();
 
 const useAuthentication = () => {
   const [authenticated, setAuthenticated] = useState(false);
@@ -225,6 +230,7 @@ function App() {
         {authenticated ? (
           <div className="flex flex-col">
             <NavbarRC />
+            <CommandPalette />
             <div className="flex flex-1">
               {/* Main Content - Responsive */}
               <main className="flex-1 min-w-0 lg:pr-80">

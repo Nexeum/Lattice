@@ -1,3 +1,105 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Dark theme overlay
+   ---------------------------------------------------------------------------
+   Pragmatic dark mode: instead of retrofitting `dark:` variants into every
+   component, this layer remaps the light-theme utility classes the app
+   actually uses whenever `.dark` is set on <html> (see src/lib/theme.js).
+   Deliberately untouched: .bg-black, .bg-gray-800/900 and the terminal
+   panels — they are already dark.
+--------------------------------------------------------------------------- */
+
+.dark {
+  color-scheme: dark;
+}
+
+/* --- Surfaces ----------------------------------------------------------- */
+.dark .bg-white { background-color: #111827 !important; }
+.dark .bg-gray-50 { background-color: #0b0f19 !important; }
+.dark .bg-gray-100 { background-color: #1f2937 !important; }
+.dark .bg-gray-200 { background-color: #374151 !important; }
+.dark .bg-gray-300 { background-color: #4b5563 !important; }
+
+/* Translucent card/navbar variants */
+.dark .bg-white\/95 { background-color: rgba(17, 24, 39, 0.95) !important; }
+.dark .bg-white\/90 { background-color: rgba(17, 24, 39, 0.9) !important; }
+.dark .bg-white\/80 { background-color: rgba(17, 24, 39, 0.8) !important; }
+.dark .bg-white\/70 { background-color: rgba(17, 24, 39, 0.7) !important; }
+.dark .bg-white\/50 { background-color: rgba(17, 24, 39, 0.5) !important; }
+.dark .bg-gray-50\/80 { background-color: rgba(11, 15, 25, 0.8) !important; }
+
+/* --- Text --------------------------------------------------------------- */
+.dark .text-gray-900 { color: #f3f4f6 !important; }
+.dark .text-gray-800 { color: #e5e7eb !important; }
+.dark .text-gray-700 { color: #d1d5db !important; }
+.dark .text-gray-600 { color: #9ca3af !important; }
+.dark .text-gray-500 { color: #6b7280 !important; }
+.dark .text-black { color: #f3f4f6 !important; }
+
+/* --- Borders / dividers ------------------------------------------------- */
+.dark .border-gray-100 { border-color: #1f2937 !important; }
+.dark .border-gray-200 { border-color: #374151 !important; }
+.dark .border-gray-200\/50 { border-color: rgba(55, 65, 81, 0.5) !important; }
+.dark .border-gray-300 { border-color: #4b5563 !important; }
+.dark .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #1f2937 !important; }
+.dark .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: #374151 !important; }
+
+/* --- Shadows (soften on dark surfaces) ---------------------------------- */
+.dark .shadow-sm,
+.dark .shadow { box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.4) !important; }
+.dark .shadow-md,
+.dark .shadow-lg { box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.55) !important; }
+.dark .shadow-xl,
+.dark .shadow-2xl { box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.65) !important; }
+
+/* --- Hover states ------------------------------------------------------- */
+.dark .hover\:bg-gray-50:hover { background-color: #1f2937 !important; }
+.dark .hover\:bg-gray-100:hover { background-color: #374151 !important; }
+.dark .hover\:bg-gray-200:hover { background-color: #4b5563 !important; }
+.dark .hover\:bg-red-50:hover { background-color: rgba(239, 68, 68, 0.15) !important; }
+.dark .hover\:text-gray-900:hover { color: #f3f4f6 !important; }
+.dark .hover\:text-gray-700:hover { color: #d1d5db !important; }
+.dark .hover\:text-gray-600:hover { color: #9ca3af !important; }
+
+/* --- Tinted chips / alerts ---------------------------------------------- */
+.dark .bg-blue-50 { background-color: rgba(59, 130, 246, 0.15) !important; }
+.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.22) !important; }
+.dark .bg-green-50 { background-color: rgba(34, 197, 94, 0.15) !important; }
+.dark .bg-green-100 { background-color: rgba(34, 197, 94, 0.22) !important; }
+.dark .bg-red-50 { background-color: rgba(239, 68, 68, 0.15) !important; }
+.dark .bg-red-100 { background-color: rgba(239, 68, 68, 0.22) !important; }
+.dark .bg-amber-50 { background-color: rgba(245, 158, 11, 0.15) !important; }
+.dark .bg-yellow-50 { background-color: rgba(234, 179, 8, 0.15) !important; }
+.dark .bg-purple-50 { background-color: rgba(168, 85, 247, 0.15) !important; }
+.dark .bg-orange-50 { background-color: rgba(249, 115, 22, 0.15) !important; }
+
+.dark .border-red-100 { border-color: rgba(239, 68, 68, 0.3) !important; }
+.dark .border-green-100 { border-color: rgba(34, 197, 94, 0.3) !important; }
+.dark .border-blue-100 { border-color: rgba(59, 130, 246, 0.3) !important; }
+.dark .border-amber-100 { border-color: rgba(245, 158, 11, 0.3) !important; }
+.dark .border-purple-100 { border-color: rgba(168, 85, 247, 0.3) !important; }
+
+/* Darker tinted text reads poorly on dark chips — lift one step. */
+.dark .text-red-700 { color: #f87171 !important; }
+.dark .text-red-600 { color: #f87171 !important; }
+.dark .text-green-700 { color: #4ade80 !important; }
+.dark .text-blue-700 { color: #60a5fa !important; }
+.dark .text-amber-800 { color: #fbbf24 !important; }
+.dark .text-purple-700 { color: #c084fc !important; }
+
+/* --- Form controls ------------------------------------------------------ */
+.dark input:not(.bg-transparent):not([type="checkbox"]):not([type="radio"]),
+.dark select:not(.bg-transparent),
+.dark textarea:not(.bg-transparent) {
+  background-color: #1f2937 !important;
+  color: #f3f4f6 !important;
+  border-color: #374151 !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #6b7280 !important;
+}

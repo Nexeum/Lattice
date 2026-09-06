@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (import check)
+    name: Backend (import check + unit tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,14 +23,20 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
       - name: Install dependencies
-        run: pip install -r backend/requirements.txt
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 
       - name: Import-check services
         working-directory: backend
         run: python -c "import app, container, room, package, auth_shared"
+
+      - name: Unit tests
+        working-directory: backend
+        run: python -m pytest -q
 
   frontend:
     name: Frontend (build)
@@ -60,3 +66,7 @@ jobs:
 
       - name: Build images
         run: docker compose build
+
+# Playwright E2E (frontend/e2e) is intentionally NOT run in CI: it assumes the
+# full stack (4 backend services + Vite dev server) is already running locally.
+# Run it on a developer machine with: cd frontend && npm run e2e
