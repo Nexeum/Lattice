@@ -8,13 +8,13 @@ import { Register } from "./components/Register";
 import { Dashboard } from "./components/Dashboard";
 import { NavbarRC } from "./components/Navbar";
 import { Right } from "./components/Right";
-import { Statify } from "./components/Statify";
 import { Nodesly } from "./components/Nodesly";
 import { ContainerDetails } from "./components/ContainerDetails";
 import { Room } from "./components/room";
 import { Package } from "./components/Package";
 import { Node } from "./components/Node";
 import { Home } from "./components/Home";
+import { PublicNavbar } from "./components/PublicNavbar";
 import ApiDocumentation from './components/Api';
 
 
@@ -51,7 +51,7 @@ const Auth = ({ onAuthenticate }) => {
 
     try {
       const response = await axios.post(
-        "http://127.0.0.1:8000/login",
+        "http://localhost:5005/login",
         credentials,
         { headers: { 'Content-Type': 'application/json' } }
       );
@@ -82,7 +82,7 @@ const Auth = ({ onAuthenticate }) => {
             <Container className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-3xl font-light text-gray-900 mb-2">Welcome back</h1>
-          <p className="text-gray-600">Sign in to your Innoxus account</p>
+          <p className="text-gray-600">Sign in to your Lattice account</p>
         </div>
 
         {/* Login card */}
@@ -234,12 +234,6 @@ function App() {
                   />
                   <ProtectedRoute
                     exact
-                    path="/statify"
-                    component={Statify}
-                    authenticated={authenticated}
-                  />
-                  <ProtectedRoute
-                    exact
                     path="/container/:id"
                     component={ContainerDetails}
                     authenticated={authenticated}
@@ -268,6 +262,7 @@ function App() {
                     component={ApiDocumentation}
                     authenticated={authenticated}
                   />
+                  <Redirect to="/" />
                 </Switch>
               </main>
               
@@ -281,6 +276,14 @@ function App() {
           <Switch>
             <Route exact path="/">
               <Home />
+            </Route>
+            <Route exact path="/api-docs">
+              <div className="min-h-screen bg-white">
+                <PublicNavbar />
+                <div className="pt-16">
+                  <ApiDocumentation />
+                </div>
+              </div>
             </Route>
             <Route exact path="/register">
               <Register />

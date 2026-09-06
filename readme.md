@@ -1,47 +1,72 @@
-# Innoxus
+# Lattice
 
-**Overview**
+Local Docker orchestration platform. Manage workspaces backed by Docker-in-Docker containers, spawn nested containers inside them, install plugins into any level of the hierarchy, run per-plugin CI pipelines, and explore the whole thing through a live network topology — all from a web dashboard.
 
-This project provides a streamlined way to orchestrate a collection of APIs built using the Uvicorn ASGI server. A convenient bash script simplifies the management of these APIs.
+## Features
 
-**Prerequisites**
+- **Workspaces (rooms):** each workspace auto-provisions its own Docker-in-Docker parent container (`docker:dind`). Nodes (children) are created inside it, and DinD children can host their own containers.
+- **Terminal:** xterm.js shell that executes inside the workspace parent or any selected child (Docker-in-Docker exec).
+- **Plugins:** GitHub-style plugin registry backed by MongoDB + GridFS — file browser, README rendering, stars, uploads.
+- **CI pipelines:** GitHub-Actions-style runs per plugin. Each run executes the plugin's steps (`lattice-ci.json`, or `install.sh` / `test.sh` by convention) inside an ephemeral container, with per-step status and logs. Uploads trigger runs automatically.
+- **Plugin installs:** install a plugin's files into the workspace parent or any nested child (`/opt/lattice/plugins/<name>`, running `install.sh` when present).
+- **Network topology:** React Flow map of workspaces, containers and Docker networks.
+- **Live metrics:** CPU, memory, network and block I/O per container (`docker stats`), plus host health.
 
-* macOS operating system
-* Bash shell
-* Uvicorn installed
-* The following API modules installed:
-    * **app:**  Provides user authentication (login and registration) functionality  and implements secure routes that require valid JSON Web Tokens (JWTs) for access.
-    * **container:** Provides a set of tools to manage and monitor Docker containers through an API.
-    * **room:** Provides a basic REST API to manage a collection of "rooms" within a MongoDB database
-    * **package:** Establishes an API to manage a collection of software packages and their associated files within a MongoDB database. It utilizes GridFS to optimize the storage and retrieval of these potentially large files.
-    * **tars:** Establishes a TensorFlow-based chatbot as an API. The chatbot aims to provide answers specifically related to Docker concepts
+## Architecture
 
-**Getting Started**
+| Service | Port | Purpose |
+|---------|------|---------|
+| `backend/app.py` | 5005 | Auth (JWT), users (MongoDB) |
+| `backend/container.py` | 5001 | Docker engine API: containers, DinD nodes, exec, metrics, topology, plugin installs, CI runs |
+| `backend/room.py` | 5002 | Workspaces CRUD (MongoDB) |
+| `backend/package.py` | 5003 | Plugin registry (MongoDB + GridFS) |
+| `frontend/` | 3000 | React dashboard (CRA + Tailwind) |
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/Nexeum/Innoxus.git
+> Port 5000 is intentionally avoided: macOS AirPlay Receiver occupies it.
 
-2. **Navigate to the project directory**:
-   ```bash
-   cd Innoxus
+## Requirements
 
-3. **Grant executable permissions**:
-   ```bash
-   chmod +x orquestador.sh
+- Docker (Docker Desktop, colima, etc.)
+- Python 3.11+
+- Node.js 18+
+- MongoDB on `localhost:27017` (e.g. `docker run -d --name lattice-mongo -p 27017:27017 mongo:7`)
 
-4. **Run the script**:
-   ```bash
-   ./orquestador.sh
+## Getting started
 
-Script Explanation
+```bash
+# Backend
+cd backend
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+./orquestador.sh          # or start each uvicorn service manually
 
-*  The orquestador.sh script is the heart of this project.
-* It uses the start_uvicorn function to initialize Uvicorn instances, each in a separate Terminal window.
-* The function requires the working directory, app name, and port number to function.
-* Configurations for each API are stored in an array.
-* The script iterates through the configurations, calling start_uvicorn to launch the APIs.
+# Frontend
+cd frontend
+npm install
+npm start                 # http://localhost:3000
+```
 
-** Troubleshooting **
+Register a user from the UI and sign in. Every backend service exposes Swagger docs at `/docs` (e.g. http://localhost:5001/docs).
 
-If you encounter errors while starting a Uvicorn instance, the script will display an error message and exit. Ensure your API code and its dependencies are correct.
+## CLI
+
+`bin/lattice` is a small bash client for the local APIs:
+
+```bash
+export PATH="$PWD/bin:$PATH"
+
+lattice login you@example.com
+lattice create my-plugin --version 1.0.0
+lattice push <package_id>              # uploads the current directory's files
+lattice install <package_id> <container_id>
+lattice exec <container_id> ls -la
+```
+
+## CI pipeline definition
+
+A plugin's pipeline is resolved in this order:
+
+1. `lattice-ci.json` — `[{"name": "Build", "run": "sh build.sh"}, ...]`
+2. Conventions: `install.sh` → Install step, `test.sh` → Test step
+3. Fallback: a file validation step
+
+Runs execute in a disposable `alpine:3.19` container with the plugin files mounted at `/work/<plugin>`.

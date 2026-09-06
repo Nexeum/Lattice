@@ -1,116 +1,727 @@
-import React, { useState, useEffect } from "react";
-import { 
-  Star, 
-  Download, 
-  Code, 
-  FileText, 
-  Folder,
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useParams, useHistory } from "react-router-dom";
+import {
+  Star,
+  Code,
+  FileText,
+  Scale,
+  Tag,
+  Trash2,
+  Upload,
+  ArrowLeft,
+  X,
   Copy,
-  ExternalLink,
-  Terminal,
-  GitBranch,
-  Shield,
-  Users,
-  Calendar,
-  Package as PackageIcon
+  Check,
+  BookOpen,
+  Package as PackageIcon,
+  Play,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Circle,
+  Slash,
+  ChevronDown,
+  ChevronRight,
+  AlertCircle
 } from "lucide-react";
 
-export const Package = () => {
-  const [packageData, setPackageData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState("overview");
+const API_BASE = "http://localhost:5003";
+const CI_BASE = "http://localhost:5001";
+const README_NAMES = ["readme", "readme.md", "readme.txt"];
+const COPY_FEEDBACK_MS = 2000;
+const CI_POLL_MS = 2000;
 
-  // Get ID from URL
-  const id = window.location.pathname.split('/').pop();
+/* ------------------------------------------------------------------ */
+/* Tiny hand-rolled markdown renderer.                                 */
+/* Output is built as React elements (never dangerouslySetInnerHTML),  */
+/* so any HTML in the source is escaped automatically by React.        */
+/* ------------------------------------------------------------------ */
+
+const INLINE_PATTERN = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+
+const renderInline = (text) =>
+  text.split(INLINE_PATTERN).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return (
+        <strong key={index} className="font-semibold text-gray-900">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return (
+        <code
+          key={index}
+          className="px-1.5 py-0.5 bg-gray-100 rounded text-[13px] font-mono text-gray-800"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
+
+const renderMarkdown = (source) => {
+  const lines = String(source).split(/\r?\n/);
+  const blocks = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.trim() === "") {
+      i += 1;
+      continue;
+    }
+
+    if (line.trimStart().startsWith("```")) {
+      const codeLines = [];
+      i += 1;
+      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      i += 1; // skip closing fence
+      blocks.push(
+        <pre
+          key={blocks.length}
+          className="bg-gray-50 border border-gray-200 rounded-xl p-4 overflow-x-auto text-[13px] font-mono text-gray-800 my-3"
+        >
+          <code>{codeLines.join("\n")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const content = renderInline(headingMatch[2]);
+      const headingClasses = {
+        1: "text-2xl font-semibold text-gray-900 mt-6 mb-3 pb-2 border-b border-gray-200 first:mt-0",
+        2: "text-xl font-semibold text-gray-900 mt-5 mb-2 pb-2 border-b border-gray-100 first:mt-0",
+        3: "text-lg font-semibold text-gray-900 mt-4 mb-2 first:mt-0"
+      };
+      const HeadingTag = `h${level}`;
+      blocks.push(
+        <HeadingTag key={blocks.length} className={headingClasses[level]}>
+          {content}
+        </HeadingTag>
+      );
+      i += 1;
+      continue;
+    }
+
+    if (line.trimStart().startsWith("- ")) {
+      const items = [];
+      while (i < lines.length && lines[i].trimStart().startsWith("- ")) {
+        items.push(lines[i].trimStart().slice(2));
+        i += 1;
+      }
+      blocks.push(
+        <ul key={blocks.length} className="list-disc pl-6 space-y-1 my-3 text-gray-700">
+          {items.map((item, index) => (
+            <li key={index}>{renderInline(item)}</li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // Paragraph: consume consecutive plain lines
+    const paragraphLines = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !lines[i].trimStart().startsWith("```") &&
+      !lines[i].trimStart().startsWith("- ") &&
+      !/^#{1,3}\s/.test(lines[i])
+    ) {
+      paragraphLines.push(lines[i]);
+      i += 1;
+    }
+    blocks.push(
+      <p key={blocks.length} className="text-gray-700 leading-relaxed my-3 first:mt-0">
+        {renderInline(paragraphLines.join(" "))}
+      </p>
+    );
+  }
+
+  return blocks;
+};
+
+/* ------------------------------------------------------------------ */
+/* File viewer: header bar + line-numbered mono content + copy button. */
+/* ------------------------------------------------------------------ */
+
+const FileViewer = ({ file, onClose }) => {
+  const [copied, setCopied] = useState(false);
+  const copyTimeoutRef = useRef(null);
 
   useEffect(() => {
-    const fetchData = async () => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(file.content || "");
+      setCopied(true);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+    } catch (error) {
+      console.error("Error copying file content:", error);
+    }
+  };
+
+  const contentLines = file.content != null ? String(file.content).split("\n") : null;
+
+  return (
+    <div className="border border-gray-200 rounded-2xl overflow-hidden bg-white">
+      <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            onClick={onClose}
+            className="p-1 text-gray-500 hover:text-gray-900 transition-colors"
+            title="Back to files"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <FileText className="w-4 h-4 text-gray-500 shrink-0" />
+          <span className="text-sm font-semibold text-gray-900 font-mono truncate">
+            {file.name}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          {contentLines != null && (
+            <button
+              onClick={handleCopy}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Copy file content"
+            >
+              {copied ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-green-600" />
+                  <span className="text-green-600">Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="p-1.5 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+            title="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {contentLines != null ? (
+        <div className="overflow-x-auto">
+          <pre className="text-[13px] font-mono leading-6 text-gray-800 py-3">
+            {contentLines.map((line, index) => (
+              <div key={index} className="flex hover:bg-gray-50">
+                <span className="w-12 shrink-0 pr-4 text-right text-gray-400 select-none">
+                  {index + 1}
+                </span>
+                <span className="pr-4 whitespace-pre">{line || " "}</span>
+              </div>
+            ))}
+          </pre>
+        </div>
+      ) : (
+        <div className="px-4 py-10 text-center text-sm text-gray-500">
+          No preview available for this file.
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* CI / Actions tab: runs list, run detail with step logs, polling.    */
+/* ------------------------------------------------------------------ */
+
+const formatCiTime = (iso) => {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+};
+
+const formatCiDuration = (seconds) => {
+  if (seconds == null || Number.isNaN(seconds) || seconds < 0) return null;
+  const total = Math.round(seconds);
+  if (total < 60) return `${total}s`;
+  return `${Math.floor(total / 60)}m ${total % 60}s`;
+};
+
+const runDurationSeconds = (run) => {
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+  const stepSum = steps.reduce(
+    (acc, step) =>
+      acc + (typeof step?.duration_seconds === "number" ? step.duration_seconds : 0),
+    0
+  );
+  if (stepSum > 0) return stepSum;
+  if (run.finished_at && run.created_at) {
+    return (new Date(run.finished_at) - new Date(run.created_at)) / 1000;
+  }
+  return null;
+};
+
+const CiStatusIcon = ({ status, className = "w-4 h-4" }) => {
+  if (status === "running") {
+    return <Loader2 className={`${className} text-amber-500 animate-spin shrink-0`} />;
+  }
+  if (status === "success") {
+    return <CheckCircle2 className={`${className} text-green-600 shrink-0`} />;
+  }
+  if (status === "failed") {
+    return <XCircle className={`${className} text-red-600 shrink-0`} />;
+  }
+  if (status === "skipped") {
+    return <Slash className={`${className} text-gray-400 shrink-0`} />;
+  }
+  return <Circle className={`${className} text-gray-300 shrink-0`} />;
+};
+
+const TriggerBadge = ({ trigger }) => (
+  <span className="inline-flex items-center px-2 py-0.5 bg-gray-50 border border-gray-200 text-gray-600 rounded-full text-[11px] font-medium">
+    {trigger || "manual"}
+  </span>
+);
+
+const RunDetail = ({ run, onBack }) => {
+  const [expandedSteps, setExpandedSteps] = useState({});
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+  const failedIndex = steps.findIndex((step) => step?.status === "failed");
+
+  useEffect(() => {
+    if (failedIndex >= 0) {
+      setExpandedSteps((prev) => (prev[failedIndex] ? prev : { ...prev, [failedIndex]: true }));
+    }
+  }, [failedIndex]);
+
+  const toggleStep = (index) =>
+    setExpandedSteps((prev) => ({ ...prev, [index]: !prev[index] }));
+
+  const created = formatCiTime(run.created_at);
+  const finished = formatCiTime(run.finished_at);
+  const duration = formatCiDuration(runDurationSeconds(run));
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 bg-gray-50 border-b border-gray-200">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            onClick={onBack}
+            className="p-1 text-gray-500 hover:text-gray-900 transition-colors shrink-0"
+            title="Back to runs"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <CiStatusIcon status={run.status} className="w-5 h-5" />
+          <span className="text-sm font-semibold text-gray-900 truncate">
+            CI pipeline #{run.number}
+          </span>
+          <TriggerBadge trigger={run.trigger} />
+        </div>
+        <div className="flex items-center gap-3 text-xs text-gray-500 shrink-0">
+          {created && <span>Started {created}</span>}
+          {finished && <span>Finished {finished}</span>}
+          {duration && <span className="font-medium text-gray-700">{duration}</span>}
+        </div>
+      </div>
+
+      {run.error && (
+        <div className="flex items-start gap-2 px-4 py-2.5 text-sm text-red-700 bg-red-50 border-b border-red-100">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{run.error}</span>
+        </div>
+      )}
+
+      {steps.length > 0 ? (
+        <div className="divide-y divide-gray-100">
+          {steps.map((step, index) => {
+            const expanded = Boolean(expandedSteps[index]);
+            const stepDuration = formatCiDuration(step?.duration_seconds);
+            return (
+              <div key={index}>
+                <button
+                  onClick={() => toggleStep(index)}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-left hover:bg-gray-50 transition-colors"
+                >
+                  {expanded ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                  )}
+                  <CiStatusIcon status={step?.status} />
+                  <span className="text-sm text-gray-900 font-medium truncate flex-1">
+                    {step?.name || `Step ${index + 1}`}
+                  </span>
+                  {stepDuration && (
+                    <span className="text-xs text-gray-500 shrink-0">{stepDuration}</span>
+                  )}
+                </button>
+                {expanded && (
+                  <div className="px-4 pb-3">
+                    <pre className="bg-gray-900 text-gray-200 text-xs p-3 rounded-lg whitespace-pre-wrap max-h-80 overflow-auto font-mono">
+                      {step?.output ? step.output : <span className="text-gray-500">No output.</span>}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="px-4 py-10 text-center text-sm text-gray-500">
+          This run has no steps.
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ActionsPanel = ({ packageId, refreshKey }) => {
+  const [runs, setRuns] = useState([]);
+  const [loadingRuns, setLoadingRuns] = useState(true);
+  const [runsError, setRunsError] = useState(null);
+  const [selectedRunId, setSelectedRunId] = useState(null);
+  const [triggering, setTriggering] = useState(false);
+
+  const fetchRuns = useCallback(async () => {
+    try {
+      const response = await fetch(`${CI_BASE}/ci/${packageId}/runs`);
+      if (!response.ok) {
+        throw new Error(`Runs request failed (${response.status})`);
+      }
+      const data = await response.json();
+      setRuns(Array.isArray(data) ? data : []);
+      setRunsError(null);
+    } catch (error) {
+      console.error("Error fetching CI runs:", error);
+      setRunsError("Could not load workflow runs.");
+    } finally {
+      setLoadingRuns(false);
+    }
+  }, [packageId]);
+
+  useEffect(() => {
+    fetchRuns();
+  }, [fetchRuns, refreshKey]);
+
+  // Poll every running run visible in the list (includes the opened one).
+  const runningKey = runs
+    .filter((run) => run.status === "running")
+    .map((run) => run._id)
+    .join(",");
+
+  useEffect(() => {
+    if (!runningKey) return undefined;
+    const ids = runningKey.split(",");
+    const poll = async () => {
+      const updates = await Promise.all(
+        ids.map(async (runId) => {
+          try {
+            const response = await fetch(`${CI_BASE}/ci/runs/${runId}`);
+            if (!response.ok) return null;
+            return await response.json();
+          } catch (error) {
+            console.error("Error polling CI run:", error);
+            return null;
+          }
+        })
+      );
+      setRuns((prev) =>
+        prev.map((run) => updates.find((update) => update && update._id === run._id) || run)
+      );
+    };
+    const interval = setInterval(poll, CI_POLL_MS);
+    return () => clearInterval(interval);
+  }, [runningKey]);
+
+  const handleRunWorkflow = async () => {
+    if (triggering) return;
+    setTriggering(true);
+    setRunsError(null);
+    try {
+      const response = await fetch(`${CI_BASE}/ci/${packageId}/run?trigger=manual`, {
+        method: "POST"
+      });
+      if (!response.ok) {
+        throw new Error(`Run request failed (${response.status})`);
+      }
+      const run = await response.json();
+      setRuns((prev) => [run, ...prev.filter((existing) => existing._id !== run._id)]);
+      setSelectedRunId(run._id);
+    } catch (error) {
+      console.error("Error starting workflow run:", error);
+      setRunsError("Could not start the workflow. Please try again.");
+    } finally {
+      setTriggering(false);
+    }
+  };
+
+  const selectedRun = selectedRunId
+    ? runs.find((run) => run._id === selectedRunId)
+    : null;
+
+  if (selectedRun) {
+    return <RunDetail run={selectedRun} onBack={() => setSelectedRunId(null)} />;
+  }
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
+        <div className="flex items-center gap-2">
+          <Play className="w-4 h-4 text-gray-500" />
+          <span className="text-sm font-semibold text-gray-900">Workflow runs</span>
+          <span className="text-xs text-gray-500">
+            {runs.length} {runs.length === 1 ? "run" : "runs"}
+          </span>
+        </div>
+        <button
+          onClick={handleRunWorkflow}
+          disabled={triggering}
+          className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium ${
+            triggering ? "opacity-60 pointer-events-none" : ""
+          }`}
+        >
+          {triggering ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Play className="w-4 h-4" />
+          )}
+          <span>{triggering ? "Starting..." : "Run workflow"}</span>
+        </button>
+      </div>
+
+      {runsError && (
+        <div className="px-4 py-2.5 text-sm text-red-700 bg-red-50 border-b border-red-100">
+          {runsError}
+        </div>
+      )}
+
+      {loadingRuns ? (
+        <div className="flex items-center justify-center py-14">
+          <div className="w-6 h-6 border-2 border-gray-200 border-t-black rounded-full animate-spin"></div>
+        </div>
+      ) : runs.length > 0 ? (
+        <div className="divide-y divide-gray-100">
+          {runs.map((run) => {
+            const time = formatCiTime(run.created_at);
+            const duration = formatCiDuration(runDurationSeconds(run));
+            return (
+              <button
+                key={run._id}
+                onClick={() => setSelectedRunId(run._id)}
+                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors group"
+              >
+                <CiStatusIcon status={run.status} className="w-5 h-5" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-gray-900 group-hover:text-blue-600 truncate">
+                      CI pipeline #{run.number}
+                    </span>
+                    <TriggerBadge trigger={run.trigger} />
+                  </div>
+                  {time && <span className="text-xs text-gray-500">{time}</span>}
+                </div>
+                <span className="text-xs text-gray-500 shrink-0">
+                  {run.status === "running" ? "In progress" : duration || "—"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-center py-14 px-4">
+          <Play className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+          <h4 className="text-base font-medium text-gray-900 mb-1">No runs yet</h4>
+          <p className="text-sm text-gray-600">
+            No runs yet — press Run workflow to start the first pipeline.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Main page                                                           */
+/* ------------------------------------------------------------------ */
+
+export const Package = () => {
+  const { id } = useParams();
+  const history = useHistory();
+
+  const [packageData, setPackageData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const [uploadSuccess, setUploadSuccess] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
+  const [starred, setStarred] = useState(false);
+  const [starring, setStarring] = useState(false);
+  const [starError, setStarError] = useState(null);
+  const [activeTab, setActiveTab] = useState("code");
+  const [ciRefreshKey, setCiRefreshKey] = useState(0);
+
+  const fetchPackage = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/packages/${id}`);
+      if (!response.ok) {
+        setNotFound(true);
+        return;
+      }
+      const data = await response.json();
+      setPackageData(data);
+      setNotFound(false);
+    } catch (error) {
+      console.error("Error fetching package:", error);
+      setNotFound(true);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
       setLoading(true);
-      try {
-        // Simulate API call
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Mock data based on ID
-        const mockPackage = {
-          _id: id,
-          name: id === "1" ? "redis-connector" : id === "2" ? "nginx-lb" : "auth-middleware",
-          description: id === "1" 
-            ? "Redis database connector plugin for seamless caching integration with automatic failover and connection pooling"
-            : id === "2" 
-            ? "Nginx load balancer plugin with auto-scaling, health checks, and SSL termination"
-            : "JWT authentication middleware plugin for secure API endpoints with role-based access control",
-          stars: id === "1" ? 142 : id === "2" ? 87 : 256,
-          downloads: id === "1" ? 5420 : id === "2" ? 3210 : 8750,
-          version: "2.1.4",
-          author: "Innoxus Team",
-          license: "MIT",
-          created_at: "2024-01-15",
-          updated_at: "2024-01-28",
-          language: id === "1" ? "Python" : id === "2" ? "Nginx Config" : "Node.js",
-          size: "2.4 MB",
-          files: id === "1" ? [
-            { name: "README.md", type: "file", size: "4.2 KB" },
-            { name: "setup.py", type: "file", size: "1.8 KB" },
-            { name: "redis_connector/", type: "folder", size: "-" },
-            { name: "redis_connector/__init__.py", type: "file", size: "856 B" },
-            { name: "redis_connector/client.py", type: "file", size: "12.4 KB" },
-            { name: "redis_connector/config.py", type: "file", size: "3.2 KB" },
-            { name: "tests/", type: "folder", size: "-" },
-            { name: "requirements.txt", type: "file", size: "234 B" },
-            { name: "LICENSE", type: "file", size: "1.1 KB" }
-          ] : [],
-          installation: {
-            docker: `docker run -d --name redis-connector \\
-  -e REDIS_HOST=redis-server \\
-  -e REDIS_PORT=6379 \\
-  innoxus/${id === "1" ? "redis-connector" : id === "2" ? "nginx-lb" : "auth-middleware"}:latest`,
-            compose: `version: '3.8'
-services:
-  ${id === "1" ? "redis-connector" : id === "2" ? "nginx-lb" : "auth-middleware"}:
-    image: innoxus/${id === "1" ? "redis-connector" : id === "2" ? "nginx-lb" : "auth-middleware"}:latest
-    ports:
-      - "8080:8080"
-    environment:
-      - NODE_ENV=production`,
-            kubernetes: `apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ${id === "1" ? "redis-connector" : id === "2" ? "nginx-lb" : "auth-middleware"}
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: ${id === "1" ? "redis-connector" : id === "2" ? "nginx-lb" : "auth-middleware"}`
-          },
-          dependencies: [
-            "redis>=4.0.0",
-            "pydantic>=1.8.0", 
-            "fastapi>=0.68.0",
-            "uvicorn>=0.15.0"
-          ],
-          tags: ["database", "redis", "cache", "connector", "plugin"]
-        };
-        
-        setPackageData(mockPackage);
-      } catch (error) {
-        console.error("Error fetching package:", error);
-      } finally {
+      await fetchPackage();
+      if (!cancelled) {
         setLoading(false);
       }
     };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchPackage]);
 
-    fetchData();
+  const handleStar = async () => {
+    if (starred || starring || !packageData) return;
+
+    const previousStars = typeof packageData.stars === "number" ? packageData.stars : 0;
+    const nextStars = previousStars + 1;
+
+    // Optimistic update (immutable)
+    setStarring(true);
+    setStarred(true);
+    setStarError(null);
+    setPackageData((prev) => (prev ? { ...prev, stars: nextStars } : prev));
+
+    try {
+      const response = await fetch(`${API_BASE}/packages/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stars: nextStars })
+      });
+      if (!response.ok) {
+        throw new Error(`Star failed (${response.status})`);
+      }
+    } catch (error) {
+      console.error("Error starring package:", error);
+      // Rollback
+      setStarred(false);
+      setStarError("Could not star this plugin. Please try again.");
+      setPackageData((prev) => (prev ? { ...prev, stars: previousStars } : prev));
+    } finally {
+      setStarring(false);
+    }
+  };
+
+  // Fire-and-forget CI run on push (contribution). Errors are tolerated;
+  // the runs list is refreshed afterwards if the Actions tab is open.
+  const triggerPushRun = useCallback(async () => {
+    try {
+      const response = await fetch(`${CI_BASE}/ci/${id}/run?trigger=push`, {
+        method: "POST"
+      });
+      if (!response.ok) {
+        throw new Error(`CI push trigger failed (${response.status})`);
+      }
+    } catch (error) {
+      console.error("Error triggering CI push run:", error);
+    } finally {
+      setCiRefreshKey((prev) => prev + 1);
+    }
   }, [id]);
 
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
-    // You could add a toast notification here
+  const handleUpload = async (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+
+    setUploading(true);
+    setUploadError(null);
+    setUploadSuccess(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch(`${API_BASE}/packages/${id}/files`, {
+        method: "POST",
+        body: formData
+      });
+      if (!response.ok) {
+        throw new Error(`Upload failed (${response.status})`);
+      }
+      await fetchPackage();
+      setUploadSuccess(`"${file.name}" contributed successfully.`);
+      triggerPushRun();
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      setUploadError("Could not upload the file. Please try again.");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
+    }
+  };
+
+  const handleDelete = async () => {
+    const confirmed = window.confirm(
+      `Delete plugin "${packageData?.name || id}"? This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const response = await fetch(`${API_BASE}/packages/${id}`, {
+        method: "DELETE"
+      });
+      if (!response.ok) {
+        throw new Error(`Delete failed (${response.status})`);
+      }
+      history.push("/");
+    } catch (error) {
+      console.error("Error deleting package:", error);
+      setDeleteError("Could not delete the plugin. Please try again.");
+      setDeleting(false);
+    }
   };
 
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 pt-16">
-        <div className="max-w-7xl mx-auto px-6 py-8">
+        <div className="max-w-6xl mx-auto px-6 py-8">
           <div className="flex items-center justify-center py-20">
             <div className="w-8 h-8 border-2 border-gray-200 border-t-black rounded-full animate-spin"></div>
           </div>
@@ -119,275 +730,298 @@ spec:
     );
   }
 
-  if (!packageData) {
+  if (notFound || !packageData) {
     return (
       <div className="min-h-screen bg-gray-50 pt-16">
-        <div className="max-w-7xl mx-auto px-6 py-8">
+        <div className="max-w-6xl mx-auto px-6 py-8">
           <div className="text-center py-20">
             <PackageIcon className="w-12 h-12 text-gray-300 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">Plugin not found</h3>
-            <p className="text-gray-600">The requested plugin could not be found.</p>
+            <p className="text-gray-600 mb-6">The requested plugin could not be found.</p>
+            <button
+              onClick={() => history.push("/")}
+              className="inline-flex items-center space-x-2 px-6 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-all duration-200 font-medium"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Back to Lattice</span>
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
+  const tags = Array.isArray(packageData.tags) ? packageData.tags : [];
+  const files = Array.isArray(packageData.files) ? packageData.files : [];
+  const starCount = typeof packageData.stars === "number" ? packageData.stars : 0;
+
+  const readmeFile = files.find(
+    (file) =>
+      file &&
+      typeof file.name === "string" &&
+      README_NAMES.includes(file.name.toLowerCase()) &&
+      file.content
+  );
+
+  const badges = [
+    { label: packageData.type, icon: Tag },
+    { label: packageData.language, icon: Code },
+    { label: packageData.license, icon: Scale },
+    { label: packageData.version ? `v${packageData.version}` : null, icon: null }
+  ].filter((badge) => badge.label != null && badge.label !== "");
+
+  const aboutRows = [
+    { label: "Language", value: packageData.language, icon: Code },
+    { label: "Version", value: packageData.version, icon: Tag },
+    { label: "License", value: packageData.license, icon: Scale }
+  ].filter((row) => row.value != null && row.value !== "");
+
+  const contributeButton = (extraClasses) => (
+    <label
+      className={`inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl hover:bg-gray-800 transition-colors text-sm font-medium cursor-pointer ${
+        uploading ? "opacity-60 pointer-events-none" : ""
+      } ${extraClasses || ""}`}
+    >
+      <Upload className="w-4 h-4" />
+      <span>{uploading ? "Uploading..." : "Contribute"}</span>
+      <input type="file" className="hidden" onChange={handleUpload} disabled={uploading} />
+    </label>
+  );
+
   return (
     <div className="min-h-screen bg-gray-50 pt-16">
-      <div className="max-w-7xl mx-auto px-6 py-8">
-        {/* Header */}
-        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8 mb-8">
-          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between space-y-6 lg:space-y-0">
-            <div className="flex-1">
-              <div className="flex items-center space-x-3 mb-4">
-                <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center">
-                  <PackageIcon className="w-6 h-6 text-white" />
-                </div>
-                <div>
-                  <h1 className="text-3xl font-light text-gray-900">{packageData.name}</h1>
-                  <p className="text-gray-600">v{packageData.version} • by {packageData.author}</p>
-                </div>
+      <div className="max-w-6xl mx-auto px-6 py-8">
+        {/* Repo header */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-6">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5 mb-1.5">
+                <PackageIcon className="w-5 h-5 text-gray-400 shrink-0" />
+                <h1 className="text-2xl font-semibold text-gray-900 truncate">
+                  {packageData.name || id}
+                </h1>
               </div>
-              
-              <p className="text-lg text-gray-700 leading-relaxed mb-6">
+              {packageData.description && (
+                <p className="text-gray-600 leading-relaxed mb-3">
+                  {packageData.description}
+                </p>
+              )}
+              {badges.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {badges.map((badge, index) => {
+                    const BadgeIcon = badge.icon;
+                    return (
+                      <span
+                        key={index}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 border border-gray-200 text-gray-700 rounded-full text-xs font-medium"
+                      >
+                        {BadgeIcon && <BadgeIcon className="w-3 h-3 text-gray-500" />}
+                        {badge.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-start gap-2 shrink-0">
+              <button
+                onClick={handleStar}
+                disabled={starred || starring}
+                title={starred ? "Starred" : "Star this plugin"}
+                className={`inline-flex items-center rounded-xl border text-sm font-medium transition-colors ${
+                  starred
+                    ? "border-gray-200 bg-gray-50 text-gray-500 cursor-default"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                <span className="inline-flex items-center gap-1.5 px-3 py-2">
+                  <Star
+                    className={`w-4 h-4 ${
+                      starred ? "text-yellow-500 fill-yellow-400" : "text-gray-500"
+                    }`}
+                  />
+                  <span>{starred ? "Starred" : "Star"}</span>
+                </span>
+                <span className="px-3 py-2 border-l border-gray-200 text-gray-900 font-semibold">
+                  {starCount}
+                </span>
+              </button>
+
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                title="Delete plugin"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-400 hover:text-red-600 hover:bg-red-50 border border-transparent hover:border-red-100 rounded-xl transition-colors disabled:opacity-50"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>{deleting ? "Deleting..." : "Delete"}</span>
+              </button>
+            </div>
+          </div>
+
+          {(starError || deleteError) && (
+            <div className="mt-3 space-y-1">
+              {starError && <p className="text-sm text-red-600">{starError}</p>}
+              {deleteError && <p className="text-sm text-red-600">{deleteError}</p>}
+            </div>
+          )}
+        </div>
+
+        {/* Main grid: code area + sidebar */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+          {/* Code column */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Tab switcher: Code | Actions */}
+            <div className="inline-flex items-center gap-1 bg-white border border-gray-200 rounded-xl shadow-sm p-1">
+              <button
+                onClick={() => setActiveTab("code")}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  activeTab === "code"
+                    ? "bg-black text-white"
+                    : "text-gray-600 hover:text-gray-900 hover:bg-gray-50"
+                }`}
+              >
+                <Code className="w-4 h-4" />
+                <span>Code</span>
+              </button>
+              <button
+                onClick={() => setActiveTab("actions")}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  activeTab === "actions"
+                    ? "bg-black text-white"
+                    : "text-gray-600 hover:text-gray-900 hover:bg-gray-50"
+                }`}
+              >
+                <Play className="w-4 h-4" />
+                <span>Actions</span>
+              </button>
+            </div>
+
+            {activeTab === "actions" ? (
+              <ActionsPanel packageId={id} refreshKey={ciRefreshKey} />
+            ) : selectedFile ? (
+              <FileViewer file={selectedFile} onClose={() => setSelectedFile(null)} />
+            ) : (
+              <>
+                {/* File browser */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
+                    <div className="flex items-center gap-2">
+                      <Code className="w-4 h-4 text-gray-500" />
+                      <span className="text-sm font-semibold text-gray-900">Files</span>
+                      <span className="text-xs text-gray-500">
+                        {files.length} {files.length === 1 ? "file" : "files"}
+                      </span>
+                    </div>
+                    {contributeButton()}
+                  </div>
+
+                  {(uploadError || uploadSuccess) && (
+                    <div
+                      className={`px-4 py-2.5 text-sm border-b ${
+                        uploadError
+                          ? "text-red-700 bg-red-50 border-red-100"
+                          : "text-green-700 bg-green-50 border-green-100"
+                      }`}
+                    >
+                      {uploadError || uploadSuccess}
+                    </div>
+                  )}
+
+                  {files.length > 0 ? (
+                    <div className="divide-y divide-gray-100">
+                      {files.map((file, index) => (
+                        <button
+                          key={index}
+                          onClick={() => setSelectedFile(file)}
+                          className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-gray-50 transition-colors group"
+                        >
+                          <FileText className="w-4 h-4 text-gray-400 shrink-0" />
+                          <span className="text-sm text-gray-900 font-mono group-hover:text-blue-600 group-hover:underline truncate">
+                            {file?.name || "unnamed file"}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-14 px-4">
+                      <FileText className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+                      <h4 className="text-base font-medium text-gray-900 mb-1">
+                        No files yet
+                      </h4>
+                      <p className="text-sm text-gray-600 mb-5">
+                        Be the first to contribute to this plugin.
+                      </p>
+                      {contributeButton()}
+                    </div>
+                  )}
+                </div>
+
+                {/* README */}
+                {readmeFile && (
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                    <div className="flex items-center gap-2 px-4 py-3 bg-gray-50 border-b border-gray-200">
+                      <BookOpen className="w-4 h-4 text-gray-500" />
+                      <span className="text-sm font-semibold text-gray-900">
+                        {readmeFile.name}
+                      </span>
+                    </div>
+                    <div className="px-6 py-5 text-[15px]">
+                      {renderMarkdown(readmeFile.content)}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Sidebar */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">About</h3>
+
+            {packageData.description ? (
+              <p className="text-sm text-gray-600 leading-relaxed mb-4">
                 {packageData.description}
               </p>
-              
-              <div className="flex flex-wrap gap-2 mb-6">
-                {packageData.tags.map((tag, index) => (
+            ) : (
+              <p className="text-sm text-gray-400 italic mb-4">No description provided.</p>
+            )}
+
+            {tags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                {tags.map((tag, index) => (
                   <span
                     key={index}
-                    className="px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-sm font-medium"
+                    className="px-2.5 py-0.5 bg-blue-50 text-blue-700 rounded-full text-xs font-medium"
                   >
                     {tag}
                   </span>
                 ))}
               </div>
-              
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-                <div>
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Star className="w-4 h-4 text-yellow-500" />
-                    <span className="text-sm font-medium text-gray-600">Stars</span>
-                  </div>
-                  <p className="text-2xl font-light text-gray-900">{packageData.stars}</p>
-                </div>
-                
-                <div>
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Download className="w-4 h-4 text-green-500" />
-                    <span className="text-sm font-medium text-gray-600">Downloads</span>
-                  </div>
-                  <p className="text-2xl font-light text-gray-900">{packageData.downloads.toLocaleString()}</p>
-                </div>
-                
-                <div>
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Code className="w-4 h-4 text-purple-500" />
-                    <span className="text-sm font-medium text-gray-600">Language</span>
-                  </div>
-                  <p className="text-lg font-medium text-gray-900">{packageData.language}</p>
-                </div>
-                
-                <div>
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Shield className="w-4 h-4 text-blue-500" />
-                    <span className="text-sm font-medium text-gray-600">License</span>
-                  </div>
-                  <p className="text-lg font-medium text-gray-900">{packageData.license}</p>
-                </div>
+            )}
+
+            <div className="space-y-2.5 pt-3 border-t border-gray-100">
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <Star className="w-4 h-4 text-gray-400" />
+                <span>
+                  <span className="font-semibold text-gray-900">{starCount}</span>{" "}
+                  {starCount === 1 ? "star" : "stars"}
+                </span>
               </div>
+              {aboutRows.map((row) => {
+                const RowIcon = row.icon;
+                return (
+                  <div key={row.label} className="flex items-center gap-2 text-sm text-gray-600">
+                    <RowIcon className="w-4 h-4 text-gray-400" />
+                    <span>
+                      {row.label}:{" "}
+                      <span className="font-medium text-gray-900">{row.value}</span>
+                    </span>
+                  </div>
+                );
+              })}
             </div>
-            
-            <div className="lg:ml-8">
-              <button className="w-full lg:w-auto flex items-center justify-center space-x-2 px-8 py-3 bg-black text-white rounded-xl hover:bg-gray-800 transition-all duration-200 font-medium mb-4">
-                <Download className="w-4 h-4" />
-                <span>Install Plugin</span>
-              </button>
-              
-              <div className="space-y-2 text-sm text-gray-600">
-                <div className="flex items-center space-x-2">
-                  <Calendar className="w-4 h-4" />
-                  <span>Updated {packageData.updated_at}</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <PackageIcon className="w-4 h-4" />
-                  <span>Size: {packageData.size}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div className="bg-white rounded-3xl shadow-sm border border-gray-100">
-          <div className="border-b border-gray-100">
-            <nav className="flex space-x-8 px-8 pt-6">
-              {[
-                { id: "overview", label: "Overview" },
-                { id: "installation", label: "Installation" },
-                { id: "files", label: "Files" },
-                { id: "dependencies", label: "Dependencies" }
-              ].map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`pb-4 text-sm font-medium border-b-2 transition-colors ${
-                    activeTab === tab.id
-                      ? "border-black text-gray-900"
-                      : "border-transparent text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </nav>
-          </div>
-
-          <div className="p-8">
-            {/* Overview Tab */}
-            {activeTab === "overview" && (
-              <div className="prose max-w-none">
-                <h3 className="text-xl font-medium text-gray-900 mb-4">About this plugin</h3>
-                <p className="text-gray-700 leading-relaxed mb-6">
-                  This plugin provides seamless integration with Redis for caching and session management in containerized applications. 
-                  It features automatic connection pooling, failover handling, and performance monitoring.
-                </p>
-                
-                <h4 className="text-lg font-medium text-gray-900 mb-3">Key Features</h4>
-                <ul className="space-y-2 text-gray-700">
-                  <li>• Automatic connection pooling and management</li>
-                  <li>• Built-in failover and retry mechanisms</li>
-                  <li>• Real-time performance monitoring</li>
-                  <li>• Easy configuration via environment variables</li>
-                  <li>• Support for Redis Cluster and Sentinel</li>
-                </ul>
-                
-                <h4 className="text-lg font-medium text-gray-900 mb-3 mt-6">Requirements</h4>
-                <div className="bg-gray-50 rounded-xl p-4">
-                  <ul className="space-y-1 text-sm text-gray-700">
-                    <li>• Docker Engine 20.0+</li>
-                    <li>• Redis Server 6.0+</li>
-                    <li>• Minimum 512MB RAM</li>
-                    <li>• Network connectivity to Redis instance</li>
-                  </ul>
-                </div>
-              </div>
-            )}
-
-            {/* Installation Tab */}
-            {activeTab === "installation" && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-xl font-medium text-gray-900 mb-4">Installation Instructions</h3>
-                  <p className="text-gray-600 mb-6">Choose your preferred installation method:</p>
-                </div>
-
-                {/* Docker */}
-                <div>
-                  <h4 className="text-lg font-medium text-gray-900 mb-3 flex items-center space-x-2">
-                    <Terminal className="w-5 h-5" />
-                    <span>Docker</span>
-                  </h4>
-                  <div className="bg-gray-900 rounded-xl p-4 relative">
-                    <button
-                      onClick={() => copyToClipboard(packageData.installation.docker)}
-                      className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white transition-colors"
-                    >
-                      <Copy className="w-4 h-4" />
-                    </button>
-                    <pre className="text-sm text-gray-100 overflow-x-auto">
-                      <code>{packageData.installation.docker}</code>
-                    </pre>
-                  </div>
-                </div>
-
-                {/* Docker Compose */}
-                <div>
-                  <h4 className="text-lg font-medium text-gray-900 mb-3">Docker Compose</h4>
-                  <div className="bg-gray-900 rounded-xl p-4 relative">
-                    <button
-                      onClick={() => copyToClipboard(packageData.installation.compose)}
-                      className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white transition-colors"
-                    >
-                      <Copy className="w-4 h-4" />
-                    </button>
-                    <pre className="text-sm text-gray-100 overflow-x-auto">
-                      <code>{packageData.installation.compose}</code>
-                    </pre>
-                  </div>
-                </div>
-
-                {/* Kubernetes */}
-                <div>
-                  <h4 className="text-lg font-medium text-gray-900 mb-3">Kubernetes</h4>
-                  <div className="bg-gray-900 rounded-xl p-4 relative">
-                    <button
-                      onClick={() => copyToClipboard(packageData.installation.kubernetes)}
-                      className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white transition-colors"
-                    >
-                      <Copy className="w-4 h-4" />
-                    </button>
-                    <pre className="text-sm text-gray-100 overflow-x-auto">
-                      <code>{packageData.installation.kubernetes}</code>
-                    </pre>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Files Tab */}
-            {activeTab === "files" && (
-              <div>
-                <h3 className="text-xl font-medium text-gray-900 mb-4">Plugin Files</h3>
-                {packageData.files.length > 0 ? (
-                  <div className="space-y-2">
-                    {packageData.files.map((file, index) => (
-                      <div
-                        key={index}
-                        className="flex items-center space-x-3 p-3 hover:bg-gray-50 rounded-lg transition-colors"
-                      >
-                        {file.type === "folder" ? (
-                          <Folder className="w-5 h-5 text-blue-500" />
-                        ) : (
-                          <FileText className="w-5 h-5 text-gray-500" />
-                        )}
-                        <span className="flex-1 text-gray-900 font-medium">{file.name}</span>
-                        <span className="text-sm text-gray-500">{file.size}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-12 bg-gray-50 rounded-xl">
-                    <FileText className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                    <h4 className="text-lg font-medium text-gray-900 mb-2">No files available</h4>
-                    <p className="text-gray-600 mb-6">This plugin doesn't expose its file structure.</p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Dependencies Tab */}
-            {activeTab === "dependencies" && (
-              <div>
-                <h3 className="text-xl font-medium text-gray-900 mb-4">Dependencies</h3>
-                <div className="space-y-3">
-                  {packageData.dependencies.map((dep, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between p-4 bg-gray-50 rounded-xl"
-                    >
-                      <div className="flex items-center space-x-3">
-                        <PackageIcon className="w-5 h-5 text-gray-500" />
-                        <span className="font-mono text-gray-900">{dep}</span>
-                      </div>
-                      <ExternalLink className="w-4 h-4 text-gray-400" />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </div>

@@ -17,7 +17,7 @@ function start_uvicorn() {
 
 # Configurations
 declare -a configs=(
-  "$(pwd) app 5000"
+  "$(pwd) app 5005"
   "$(pwd) container 5001"
   "$(pwd) room 5002"
   "$(pwd) package 5003"

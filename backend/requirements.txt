@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pymongo
+PyJWT
+docker
+requests
+numpy
+python-multipart
+psutil

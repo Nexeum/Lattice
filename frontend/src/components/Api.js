@@ -1,29 +1,41 @@
 import React, { useState } from 'react';
-import { 
-  Code, 
-  Copy, 
-  Check, 
-  Play, 
-  Book, 
-  Zap, 
-  Shield, 
-  Globe, 
-  ChevronDown, 
+import {
+  Code,
+  Copy,
+  Check,
+  Play,
+  Book,
+  Shield,
+  Globe,
+  ChevronDown,
   ChevronRight,
   Terminal,
   Key,
   ExternalLink,
-  Download
+  Server,
+  Boxes,
+  Package
 } from 'lucide-react';
+
+const AUTH_BASE_URL = 'http://localhost:5005';
+const CONTAINERS_BASE_URL = 'http://localhost:5001';
+const ROOMS_BASE_URL = 'http://localhost:5002';
+const PACKAGES_BASE_URL = 'http://localhost:5003';
+
+const SERVICES = [
+  { name: 'Auth', baseUrl: AUTH_BASE_URL, description: 'Register, login, JWT sessions' },
+  { name: 'Containers', baseUrl: CONTAINERS_BASE_URL, description: 'Docker containers, metrics, exec, topology' },
+  { name: 'Rooms', baseUrl: ROOMS_BASE_URL, description: 'Workspaces (rooms) CRUD' },
+  { name: 'Packages', baseUrl: PACKAGES_BASE_URL, description: 'Plugins/packages CRUD + file uploads' }
+];
 
 const ApiDocumentation = () => {
   const [copiedCode, setCopiedCode] = useState('');
-  const [activeEndpoint, setActiveEndpoint] = useState('containers');
   const [expandedSections, setExpandedSections] = useState({
-    authentication: true,
+    auth: true,
     containers: true,
     rooms: false,
-    nodes: false
+    packages: false
   });
 
   const copyToClipboard = (text, id) => {
@@ -71,8 +83,8 @@ const ApiDocumentation = () => {
       <div className="p-6">
         <div className="flex items-center space-x-3 mb-4">
           <span className={`px-3 py-1 rounded-lg text-xs font-semibold ${
-            method === 'GET' ? 'bg-blue-100 text-blue-800' :
-            method === 'POST' ? 'bg-green-100 text-green-800' :
+            method === 'GET' ? 'bg-green-100 text-green-800' :
+            method === 'POST' ? 'bg-blue-100 text-blue-800' :
             method === 'PUT' ? 'bg-orange-100 text-orange-800' :
             'bg-red-100 text-red-800'
           }`}>
@@ -80,9 +92,9 @@ const ApiDocumentation = () => {
           </span>
           <code className="text-sm font-mono bg-gray-100 px-3 py-1 rounded-lg">{path}</code>
         </div>
-        
+
         <p className="text-gray-600 mb-4">{description}</p>
-        
+
         {params.length > 0 && (
           <div className="mb-4">
             <h4 className="text-sm font-semibold text-gray-900 mb-2">Parameters</h4>
@@ -97,13 +109,13 @@ const ApiDocumentation = () => {
             </div>
           </div>
         )}
-        
+
         {response && (
           <div>
             <h4 className="text-sm font-semibold text-gray-900 mb-2">Response</h4>
-            <CodeBlock 
-              code={JSON.stringify(response, null, 2)} 
-              language="json" 
+            <CodeBlock
+              code={JSON.stringify(response, null, 2)}
+              language="json"
               id={`response-${method}-${path.replace(/[^a-zA-Z0-9]/g, '')}`}
             />
           </div>
@@ -112,31 +124,113 @@ const ApiDocumentation = () => {
     </div>
   );
 
-  const quickStartCode = `# Install the Innoxus CLI
-curl -fsSL https://get.innoxus.com | sh
-
-# Authenticate with your API key
-innoxus auth login --token YOUR_API_TOKEN
-
-# Create your first container
-innoxus containers create \\
-  --name "my-app" \\
-  --image "nginx:alpine" \\
-  --port 80:8080
-
-# List all containers
-innoxus containers list`;
-
-  const authExample = `curl -X POST https://api.innoxus.com/v1/auth/login \\
+  const quickStartCode = `# 1. Register a user (auth service, port 5005)
+curl -X POST ${AUTH_BASE_URL}/register \\
   -H "Content-Type: application/json" \\
-  -d '{
-    "email": "user@company.com",
-    "password": "your-password"
-  }'`;
+  -d '{"email": "dev@example.com", "password": "secret"}'
 
-  const containerExample = `curl -X GET https://api.innoxus.com/v1/containers \\
-  -H "Authorization: Bearer YOUR_TOKEN" \\
-  -H "Content-Type: application/json"`;
+# 2. Log in and grab the JWT (valid for 12 hours)
+curl -X POST ${AUTH_BASE_URL}/login \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "dev@example.com", "password": "secret"}'
+# => {"token": "eyJhbGciOi..."}
+
+# 3. List your local Docker containers (containers service, port 5001)
+curl ${CONTAINERS_BASE_URL}/containers`;
+
+  const cliSetupCode = `# The CLI is a plain bash script that lives in the repo at bin/lattice.
+# It needs curl and python3 (both ship with macOS). From the repo root:
+export PATH="$PWD/bin:$PATH"
+
+# ...or make it permanent with an alias in your shell profile:
+alias lattice="/path/to/Lattice/bin/lattice"
+
+lattice help`;
+
+  const cliWorkflowCode = `# 1. Log in once — the token is cached in ~/.lattice/config (chmod 600)
+lattice login dev@example.com
+
+# 2. Create a package for your plugin (prints the new package id)
+lattice create my-plugin --version 1.0.0 --description "My first plugin"
+
+# 3. Push: uploads every file in the current directory to the package
+#    (hidden files, node_modules and the lattice script itself are skipped)
+cd my-plugin/
+lattice push <package_id>
+
+# 4. Pick a target container and install the package into it
+lattice containers
+lattice install <package_id> <container_id>
+
+# Nested (Docker-in-Docker) target? Pass the node and the child:
+lattice install <package_id> <node_id> <child_id>
+
+# 5. Verify — run a command inside the container (no URL-encoding needed,
+#    the CLI handles it for you)
+lattice exec <container_id> ls -la /opt/lattice/plugins`;
+
+  const CLI_COMMANDS = [
+    { command: 'lattice login <email>', description: 'Prompts for the password, logs in, caches the JWT in ~/.lattice/config' },
+    { command: 'lattice register <email>', description: 'Creates a new user on the auth service' },
+    { command: 'lattice packages', description: 'Lists packages: id, name, version, file count' },
+    { command: 'lattice create <name> [--version X] [--description "..."]', description: 'Creates a package and prints its id' },
+    { command: 'lattice push <package_id>', description: 'Uploads every regular file in the current directory to the package' },
+    { command: 'lattice containers', description: 'Lists local Docker containers: short id, name, image, status' },
+    { command: 'lattice install <package_id> <container_id>', description: 'Copies package files into /opt/lattice/plugins and runs install.sh if present' },
+    { command: 'lattice install <package_id> <node_id> <child_id>', description: 'Same, but into a nested (DinD) container' },
+    { command: 'lattice exec <container_id> <command...>', description: 'Runs a shell command inside a container (URL-encodes it for you)' },
+    { command: 'lattice help', description: 'Shows usage' }
+  ];
+
+  const authExample = `# Log in to get a JWT (expires after 12 hours)
+curl -X POST ${AUTH_BASE_URL}/login \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "dev@example.com", "password": "secret"}'
+
+# Use the token to fetch your user data
+curl ${AUTH_BASE_URL}/userData \\
+  -H "Authorization: Bearer <token>"`;
+
+  const execExample = `# Run "ls -la" inside container 1a2b3c4d5e6f.
+# The command lives in the URL path, so it must be URL-encoded:
+# spaces -> %20, slashes -> %2F, etc.
+curl -X POST "${CONTAINERS_BASE_URL}/exe/1a2b3c4d5e6f/ls%20-la"
+# => {"output": "total 64\\ndrwxr-xr-x ..."}
+
+# Same idea for a nested (Docker-in-Docker) container:
+curl -X POST "${CONTAINERS_BASE_URL}/node/<outerId>/<innerId>/cat%20%2Fetc%2Fhostname"`;
+
+  const jsExample = `// Plain fetch against the local services — no SDK needed.
+const AUTH_URL = '${AUTH_BASE_URL}';
+const CONTAINERS_URL = '${CONTAINERS_BASE_URL}';
+
+async function listContainersWithMetrics(email, password) {
+  // 1. Log in (only the auth service requires a token)
+  const loginRes = await fetch(\`\${AUTH_URL}/login\`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+  if (!loginRes.ok) throw new Error(\`Login failed: \${loginRes.status}\`);
+  const { token } = await loginRes.json();
+
+  // 2. Fetch user data with the Bearer token
+  const userRes = await fetch(\`\${AUTH_URL}/userData\`, {
+    headers: { Authorization: \`Bearer \${token}\` }
+  });
+  const user = await userRes.json();
+
+  // 3. List containers and pull live metrics for the first one
+  const containers = await (await fetch(\`\${CONTAINERS_URL}/containers\`)).json();
+  if (containers.length > 0) {
+    const metrics = await (
+      await fetch(\`\${CONTAINERS_URL}/container/\${containers[0].ID}/metrics\`)
+    ).json();
+    return { user, containers, metrics };
+  }
+
+  return { user, containers, metrics: null };
+}`;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 pt-16">
@@ -147,13 +241,13 @@ innoxus containers list`;
             <Code className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-5xl font-light text-gray-900 mb-4 tracking-tight">
-            Innoxus API
+            Lattice API
           </h1>
           <p className="text-xl text-gray-600 max-w-2xl mx-auto mb-8">
-            Build powerful container orchestration solutions with our comprehensive REST API. 
-            Simple, secure, and scalable.
+            Lattice runs four FastAPI services on your machine to orchestrate local Docker
+            containers. Everything listens on localhost — no cloud, no keys, no setup.
           </p>
-          
+
           {/* Quick stats */}
           <div className="flex items-center justify-center space-x-12 text-sm text-gray-500">
             <div className="flex items-center space-x-2">
@@ -161,12 +255,12 @@ innoxus containers list`;
               <span>REST API</span>
             </div>
             <div className="flex items-center space-x-2">
-              <Shield className="w-4 h-4" />
-              <span>OAuth 2.0</span>
+              <Server className="w-4 h-4" />
+              <span>Localhost Only</span>
             </div>
             <div className="flex items-center space-x-2">
-              <Zap className="w-4 h-4" />
-              <span>Rate Limited</span>
+              <Shield className="w-4 h-4" />
+              <span>JWT Auth</span>
             </div>
           </div>
         </div>
@@ -177,10 +271,13 @@ innoxus containers list`;
             <div className="sticky top-24">
               <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-gray-200/50 p-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">Documentation</h3>
-                
+
                 <nav className="space-y-2">
                   <a href="#quick-start" className="block px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">
                     Quick Start
+                  </a>
+                  <a href="#cli" className="block px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">
+                    CLI
                   </a>
                   <a href="#authentication" className="block px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">
                     Authentication
@@ -188,25 +285,29 @@ innoxus containers list`;
                   <a href="#endpoints" className="block px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">
                     API Endpoints
                   </a>
-                  <a href="#sdks" className="block px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">
-                    SDKs & Tools
-                  </a>
                   <a href="#examples" className="block px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">
                     Examples
                   </a>
                 </nav>
 
                 <div className="mt-8 pt-6 border-t border-gray-200">
-                  <h4 className="text-sm font-semibold text-gray-900 mb-3">Resources</h4>
+                  <h4 className="text-sm font-semibold text-gray-900 mb-3">Swagger UI</h4>
+                  <p className="text-xs text-gray-500 mb-3">
+                    Every service serves interactive OpenAPI docs at <code className="bg-gray-100 px-1 rounded">/docs</code>.
+                  </p>
                   <div className="space-y-2">
-                    <a href="#" className="flex items-center space-x-2 text-sm text-gray-600 hover:text-gray-900 transition-colors">
-                      <Download className="w-4 h-4" />
-                      <span>OpenAPI Spec</span>
-                    </a>
-                    <a href="#" className="flex items-center space-x-2 text-sm text-gray-600 hover:text-gray-900 transition-colors">
-                      <ExternalLink className="w-4 h-4" />
-                      <span>Postman Collection</span>
-                    </a>
+                    {SERVICES.map((service) => (
+                      <a
+                        key={service.name}
+                        href={`${service.baseUrl}/docs`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center space-x-2 text-sm text-gray-600 hover:text-gray-900 transition-colors"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                        <span>{service.name} — {service.baseUrl.replace('http://', '')}/docs</span>
+                      </a>
+                    ))}
                   </div>
                 </div>
               </div>
@@ -224,9 +325,10 @@ innoxus containers list`;
                   </div>
                   <h2 className="text-2xl font-semibold text-gray-900">Quick Start</h2>
                 </div>
-                
+
                 <p className="text-gray-600 mb-6">
-                  Get started with the Innoxus API in minutes. Follow these steps to make your first API call.
+                  With the Lattice stack running, all four services are already listening on
+                  localhost. Register a user, log in, and start talking to your containers.
                 </p>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -234,31 +336,113 @@ innoxus containers list`;
                     <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mx-auto mb-3">
                       <Key className="w-6 h-6 text-blue-600" />
                     </div>
-                    <h3 className="font-semibold text-gray-900 mb-2">1. Get API Key</h3>
-                    <p className="text-sm text-gray-600">Create an account and generate your API token</p>
+                    <h3 className="font-semibold text-gray-900 mb-2">1. Register</h3>
+                    <p className="text-sm text-gray-600">Create a user on the auth service (port 5005)</p>
                   </div>
-                  
+
                   <div className="text-center">
                     <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center mx-auto mb-3">
                       <Terminal className="w-6 h-6 text-purple-600" />
                     </div>
-                    <h3 className="font-semibold text-gray-900 mb-2">2. Install CLI</h3>
-                    <p className="text-sm text-gray-600">Use our CLI or make direct HTTP requests</p>
+                    <h3 className="font-semibold text-gray-900 mb-2">2. Log In</h3>
+                    <p className="text-sm text-gray-600">POST /login returns a JWT valid for 12 hours</p>
                   </div>
-                  
+
                   <div className="text-center">
                     <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mx-auto mb-3">
-                      <Play className="w-6 h-6 text-green-600" />
+                      <Boxes className="w-6 h-6 text-green-600" />
                     </div>
-                    <h3 className="font-semibold text-gray-900 mb-2">3. Deploy</h3>
-                    <p className="text-sm text-gray-600">Create and manage your containers</p>
+                    <h3 className="font-semibold text-gray-900 mb-2">3. Explore</h3>
+                    <p className="text-sm text-gray-600">List containers, stream metrics, exec commands</p>
                   </div>
                 </div>
 
-                <CodeBlock 
-                  code={quickStartCode} 
-                  language="bash" 
-                  id="quick-start-example" 
+                <CodeBlock
+                  code={quickStartCode}
+                  language="bash"
+                  id="quick-start-example"
+                />
+
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mt-6">
+                  <div className="flex items-start space-x-3">
+                    <Book className="w-5 h-5 text-blue-600 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-blue-900">Interactive docs included</p>
+                      <p className="text-sm text-blue-800">
+                        Each FastAPI service exposes Swagger UI at <code>/docs</code> — for example{' '}
+                        <a href={`${CONTAINERS_BASE_URL}/docs`} target="_blank" rel="noopener noreferrer" className="underline">
+                          {CONTAINERS_BASE_URL}/docs
+                        </a>
+                        . You can try every endpoint from the browser.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* CLI */}
+            <section id="cli">
+              <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-gray-200/50 p-8">
+                <div className="flex items-center space-x-3 mb-6">
+                  <div className="w-10 h-10 bg-gradient-to-br from-gray-700 to-gray-900 rounded-xl flex items-center justify-center">
+                    <Terminal className="w-5 h-5 text-white" />
+                  </div>
+                  <h2 className="text-2xl font-semibold text-gray-900">CLI</h2>
+                </div>
+
+                <p className="text-gray-600 mb-6">
+                  Prefer a CI/CD-style, command-driven workflow over clicking through the UI?
+                  The repo ships a small bash CLI at{' '}
+                  <code className="bg-gray-100 px-2 py-0.5 rounded text-sm">bin/lattice</code>{' '}
+                  that wraps the same REST endpoints documented on this page: log in once,
+                  create a package, push every file in your plugin directory, and install it
+                  into any container — all from the terminal.
+                </p>
+
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+                  <div className="flex items-start space-x-3">
+                    <Book className="w-5 h-5 text-blue-600 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-blue-900">Local script, not a published package</p>
+                      <p className="text-sm text-blue-800">
+                        There is nothing to install from npm or Homebrew — it is a plain bash
+                        script in this repository. It only needs <code>curl</code> and{' '}
+                        <code>python3</code>, and talks to the same localhost services
+                        (auth :5005, containers :5001, packages :5003).
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Setup</h3>
+                <div className="mb-6">
+                  <CodeBlock
+                    code={cliSetupCode}
+                    language="bash"
+                    id="cli-setup-example"
+                  />
+                </div>
+
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">Commands</h3>
+                <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-gray-200/50 overflow-hidden mb-6">
+                  <div className="p-6 space-y-3">
+                    {CLI_COMMANDS.map((entry) => (
+                      <div key={entry.command} className="flex flex-col sm:flex-row sm:items-baseline sm:space-x-3 text-sm">
+                        <code className="bg-gray-100 px-2 py-1 rounded text-xs font-mono whitespace-nowrap">{entry.command}</code>
+                        <span className="text-gray-600 mt-1 sm:mt-0">{entry.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">
+                  Full workflow: login → create → push → install
+                </h3>
+                <CodeBlock
+                  code={cliWorkflowCode}
+                  language="bash"
+                  id="cli-workflow-example"
                 />
               </div>
             </section>
@@ -274,23 +458,45 @@ innoxus containers list`;
                 </div>
 
                 <p className="text-gray-600 mb-6">
-                  The Innoxus API uses Bearer token authentication. Include your API token in the Authorization header.
+                  The auth service issues a JWT on login, valid for 12 hours. Send it as{' '}
+                  <code className="bg-gray-100 px-2 py-0.5 rounded text-sm">Authorization: Bearer &lt;token&gt;</code>{' '}
+                  when calling <code className="bg-gray-100 px-2 py-0.5 rounded text-sm">/userData</code>.
                 </p>
 
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
                   <div className="flex items-start space-x-3">
-                    <Shield className="w-5 h-5 text-blue-600 mt-0.5" />
+                    <Shield className="w-5 h-5 text-amber-600 mt-0.5" />
                     <div>
-                      <p className="text-sm font-medium text-blue-900">Base URL</p>
-                      <code className="text-sm text-blue-800">https://api.innoxus.com/v1</code>
+                      <p className="text-sm font-medium text-amber-900">Heads up: only the auth service checks tokens</p>
+                      <p className="text-sm text-amber-800">
+                        The containers (5001), rooms (5002), and packages (5003) services currently
+                        accept requests without authentication. They are intended to be reached
+                        only from your own machine — do not expose them beyond localhost.
+                      </p>
                     </div>
                   </div>
                 </div>
 
-                <CodeBlock 
-                  code={authExample} 
-                  language="bash" 
-                  id="auth-example" 
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+                  <div className="flex items-start space-x-3">
+                    <Server className="w-5 h-5 text-blue-600 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-blue-900">Service base URLs</p>
+                      <div className="text-sm text-blue-800 space-y-1 mt-1">
+                        {SERVICES.map((service) => (
+                          <div key={service.name}>
+                            <code>{service.baseUrl}</code> — {service.description}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <CodeBlock
+                  code={authExample}
+                  language="bash"
+                  id="auth-example"
                 />
               </div>
             </section>
@@ -306,69 +512,177 @@ innoxus containers list`;
                 </div>
 
                 <div className="space-y-6">
+                  {/* Auth Section */}
+                  <div className="border border-gray-200 rounded-xl overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('auth')}
+                      className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                    >
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        Auth <span className="text-sm font-normal text-gray-500">— {AUTH_BASE_URL}</span>
+                      </h3>
+                      {expandedSections.auth ? (
+                        <ChevronDown className="w-5 h-5 text-gray-600" />
+                      ) : (
+                        <ChevronRight className="w-5 h-5 text-gray-600" />
+                      )}
+                    </button>
+
+                    {expandedSections.auth && (
+                      <div className="p-4 space-y-4">
+                        <EndpointCard
+                          method="POST"
+                          path="/register"
+                          description="Create a new user account."
+                          params={[
+                            { name: 'email', type: 'string', description: 'User email (request body)' },
+                            { name: 'password', type: 'string', description: 'User password (request body)' }
+                          ]}
+                          response={{ message: 'User registered successfully' }}
+                        />
+
+                        <EndpointCard
+                          method="POST"
+                          path="/login"
+                          description="Authenticate and receive a JWT valid for 12 hours."
+                          params={[
+                            { name: 'email', type: 'string', description: 'User email (request body)' },
+                            { name: 'password', type: 'string', description: 'User password (request body)' }
+                          ]}
+                          response={{ token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' }}
+                        />
+
+                        <EndpointCard
+                          method="GET"
+                          path="/userData"
+                          description="Return the authenticated user's data. Requires the Authorization: Bearer <token> header."
+                          response={{ email: 'dev@example.com' }}
+                        />
+                      </div>
+                    )}
+                  </div>
+
                   {/* Containers Section */}
                   <div className="border border-gray-200 rounded-xl overflow-hidden">
                     <button
                       onClick={() => toggleSection('containers')}
                       className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
                     >
-                      <h3 className="text-lg font-semibold text-gray-900">Containers</h3>
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        Containers <span className="text-sm font-normal text-gray-500">— {CONTAINERS_BASE_URL}</span>
+                      </h3>
                       {expandedSections.containers ? (
                         <ChevronDown className="w-5 h-5 text-gray-600" />
                       ) : (
                         <ChevronRight className="w-5 h-5 text-gray-600" />
                       )}
                     </button>
-                    
+
                     {expandedSections.containers && (
                       <div className="p-4 space-y-4">
                         <EndpointCard
                           method="GET"
                           path="/containers"
-                          description="List all containers in your account"
-                          response={{
-                            "containers": [
-                              {
-                                "id": "1a2b3c4d5e6f",
-                                "name": "nginx-frontend",
-                                "image": "nginx:alpine",
-                                "status": "running",
-                                "ip": "172.18.0.2",
-                                "created_at": "2024-01-15T10:30:00Z"
-                              }
-                            ],
-                            "total": 1
-                          }}
+                          description="List local Docker containers (docker ps output enriched with IP, port, and status)."
+                          response={[
+                            {
+                              ID: '1a2b3c4d5e6f',
+                              Names: 'nginx-frontend',
+                              Image: 'nginx:alpine',
+                              Status: 'Up 2 hours',
+                              IP: '172.18.0.2',
+                              Port: '8080'
+                            }
+                          ]}
                         />
-                        
+
                         <EndpointCard
-                          method="POST"
-                          path="/containers"
-                          description="Create a new container"
+                          method="GET"
+                          path="/container/{id}/metrics"
+                          description="Live resource usage for one container (docker stats)."
                           params={[
-                            { name: "name", type: "string", description: "Container name" },
-                            { name: "image", type: "string", description: "Docker image" },
-                            { name: "shell", type: "string", description: "Default shell (optional)" }
+                            { name: 'id', type: 'string', description: 'Container ID or name' }
                           ]}
                           response={{
-                            "id": "new-container-id",
-                            "name": "my-app",
-                            "image": "nginx:alpine",
-                            "status": "creating",
-                            "ip": "172.18.0.5"
+                            CPUPerc: '0.34%',
+                            MemPerc: '1.20%',
+                            MemUsage: '24.5MiB / 1.94GiB',
+                            NetIO: '1.2kB / 800B',
+                            BlockIO: '0B / 0B',
+                            PIDs: '3'
                           }}
                         />
 
                         <EndpointCard
-                          method="DELETE"
-                          path="/containers/{id}"
-                          description="Delete a specific container"
+                          method="POST"
+                          path="/exe/{id}/{command}"
+                          description="Execute a shell command inside a container. The command goes in the URL path, so it must be URL-encoded (e.g. ls%20-la)."
                           params={[
-                            { name: "id", type: "string", description: "Container ID" }
+                            { name: 'id', type: 'string', description: 'Container ID or name' },
+                            { name: 'command', type: 'string', description: 'URL-encoded shell command' }
+                          ]}
+                          response={{ output: 'total 64\ndrwxr-xr-x 1 root root 4096 ...' }}
+                        />
+
+                        <EndpointCard
+                          method="POST"
+                          path="/node/{outerId}/{innerId}/{command}"
+                          description="Execute a command inside a nested container (Docker-in-Docker): the inner container runs inside the outer node container."
+                          params={[
+                            { name: 'outerId', type: 'string', description: 'Node (outer) container ID' },
+                            { name: 'innerId', type: 'string', description: 'Inner container ID' },
+                            { name: 'command', type: 'string', description: 'URL-encoded shell command' }
+                          ]}
+                          response={{ output: 'inner-container-hostname' }}
+                        />
+
+                        <EndpointCard
+                          method="GET"
+                          path="/containers/{id}/ps"
+                          description="Run docker ps inside a DinD node container to list its nested containers."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Node container ID' }
+                          ]}
+                          response={[
+                            { ID: 'abc123', Names: 'inner-app', Image: 'alpine', Status: 'Up 5 minutes' }
+                          ]}
+                        />
+
+                        <EndpointCard
+                          method="GET"
+                          path="/container/{id}/overload"
+                          description="Load test a container's HTTP endpoint and report latency percentiles and throughput."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Container ID or name' }
                           ]}
                           response={{
-                            "message": "Container deleted successfully",
-                            "id": "1a2b3c4d5e6f"
+                            p50_ms: 12.4,
+                            p90_ms: 31.7,
+                            mean_ms: 15.2,
+                            qps: 480.5
+                          }}
+                        />
+
+                        <EndpointCard
+                          method="GET"
+                          path="/system/health"
+                          description="Host machine health: CPU, memory, and storage usage percentages."
+                          response={{ cpu: 23.5, memory: 61.2, storage: 48.9 }}
+                        />
+
+                        <EndpointCard
+                          method="GET"
+                          path="/topology"
+                          description="Docker networks and the containers attached to each of them."
+                          response={{
+                            networks: [
+                              {
+                                name: 'bridge',
+                                containers: [
+                                  { id: '1a2b3c4d5e6f', name: 'nginx-frontend', ip: '172.18.0.2' }
+                                ]
+                              }
+                            ]
                           }}
                         />
                       </div>
@@ -381,88 +695,143 @@ innoxus containers list`;
                       onClick={() => toggleSection('rooms')}
                       className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
                     >
-                      <h3 className="text-lg font-semibold text-gray-900">Rooms (Orchestrators)</h3>
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        Rooms <span className="text-sm font-normal text-gray-500">— {ROOMS_BASE_URL}</span>
+                      </h3>
                       {expandedSections.rooms ? (
                         <ChevronDown className="w-5 h-5 text-gray-600" />
                       ) : (
                         <ChevronRight className="w-5 h-5 text-gray-600" />
                       )}
                     </button>
-                    
+
                     {expandedSections.rooms && (
                       <div className="p-4 space-y-4">
                         <EndpointCard
                           method="GET"
                           path="/rooms"
-                          description="List all orchestrator rooms"
-                          response={{
-                            "rooms": [
-                              {
-                                "id": "room-123",
-                                "name": "Development Team",
-                                "orchestrator_ip": "172.18.0.1",
-                                "containers_count": 3,
-                                "status": "active"
-                              }
-                            ]
-                          }}
+                          description="List all rooms (workspaces)."
+                          response={[
+                            { id: 'room-123', name: 'Development' }
+                          ]}
                         />
-                        
+
+                        <EndpointCard
+                          method="POST"
+                          path="/rooms"
+                          description="Create a new room."
+                          response={{ id: 'room-124', name: 'Staging' }}
+                        />
+
                         <EndpointCard
                           method="GET"
-                          path="/rooms/{id}/topology"
-                          description="Get network topology for a room"
-                          response={{
-                            "orchestrator": {
-                              "id": "orchestrator",
-                              "ip": "172.18.0.1"
-                            },
-                            "nodes": [
-                              {
-                                "id": "container-1",
-                                "name": "nginx-frontend",
-                                "ip": "172.18.0.2",
-                                "status": "active"
-                              }
-                            ]
-                          }}
+                          path="/rooms/{id}"
+                          description="Get a single room by ID."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Room ID' }
+                          ]}
+                          response={{ id: 'room-123', name: 'Development' }}
+                        />
+
+                        <EndpointCard
+                          method="PUT"
+                          path="/rooms/{id}"
+                          description="Update a room."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Room ID' }
+                          ]}
+                          response={{ id: 'room-123', name: 'Development (renamed)' }}
+                        />
+
+                        <EndpointCard
+                          method="DELETE"
+                          path="/rooms/{id}"
+                          description="Delete a room."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Room ID' }
+                          ]}
+                          response={{ message: 'Room deleted' }}
                         />
                       </div>
                     )}
                   </div>
-                </div>
-              </div>
-            </section>
 
-            {/* SDKs and Tools */}
-            <section id="sdks">
-              <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-gray-200/50 p-8">
-                <div className="flex items-center space-x-3 mb-6">
-                  <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-xl flex items-center justify-center">
-                    <Code className="w-5 h-5 text-white" />
-                  </div>
-                  <h2 className="text-2xl font-semibold text-gray-900">SDKs & Tools</h2>
-                </div>
+                  {/* Packages Section */}
+                  <div className="border border-gray-200 rounded-xl overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('packages')}
+                      className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                    >
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        Packages <span className="text-sm font-normal text-gray-500">— {PACKAGES_BASE_URL}</span>
+                      </h3>
+                      {expandedSections.packages ? (
+                        <ChevronDown className="w-5 h-5 text-gray-600" />
+                      ) : (
+                        <ChevronRight className="w-5 h-5 text-gray-600" />
+                      )}
+                    </button>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="bg-gray-50 rounded-xl p-6">
-                    <h3 className="font-semibold text-gray-900 mb-3">Official SDKs</h3>
-                    <ul className="space-y-2 text-sm text-gray-600">
-                      <li>• JavaScript/Node.js SDK</li>
-                      <li>• Python SDK</li>
-                      <li>• Go SDK</li>
-                      <li>• CLI Tool</li>
-                    </ul>
-                  </div>
-                  
-                  <div className="bg-gray-50 rounded-xl p-6">
-                    <h3 className="font-semibold text-gray-900 mb-3">Community Tools</h3>
-                    <ul className="space-y-2 text-sm text-gray-600">
-                      <li>• Terraform Provider</li>
-                      <li>• GitHub Actions</li>
-                      <li>• Kubernetes Operator</li>
-                      <li>• Docker Compose Plugin</li>
-                    </ul>
+                    {expandedSections.packages && (
+                      <div className="p-4 space-y-4">
+                        <EndpointCard
+                          method="GET"
+                          path="/packages"
+                          description="List all plugin packages."
+                          response={[
+                            { id: 'pkg-1', name: 'metrics-exporter' }
+                          ]}
+                        />
+
+                        <EndpointCard
+                          method="POST"
+                          path="/packages"
+                          description="Create a new package."
+                          response={{ id: 'pkg-2', name: 'log-forwarder' }}
+                        />
+
+                        <EndpointCard
+                          method="GET"
+                          path="/packages/{id}"
+                          description="Get a single package by ID."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Package ID' }
+                          ]}
+                          response={{ id: 'pkg-1', name: 'metrics-exporter' }}
+                        />
+
+                        <EndpointCard
+                          method="PUT"
+                          path="/packages/{id}"
+                          description="Update a package."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Package ID' }
+                          ]}
+                          response={{ id: 'pkg-1', name: 'metrics-exporter-v2' }}
+                        />
+
+                        <EndpointCard
+                          method="DELETE"
+                          path="/packages/{id}"
+                          description="Delete a package."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Package ID' }
+                          ]}
+                          response={{ message: 'Package deleted' }}
+                        />
+
+                        <EndpointCard
+                          method="POST"
+                          path="/packages/{id}/files"
+                          description="Upload a file to a package (multipart/form-data). Files are stored in GridFS."
+                          params={[
+                            { name: 'id', type: 'string', description: 'Package ID' },
+                            { name: 'file', type: 'file', description: 'File to upload (multipart form field)' }
+                          ]}
+                          response={{ message: 'File uploaded', file_id: '65f1c2...' }}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -480,34 +849,32 @@ innoxus containers list`;
 
                 <div className="space-y-6">
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900 mb-3">List Containers</h3>
-                    <CodeBlock 
-                      code={containerExample} 
-                      language="bash" 
-                      id="container-list-example" 
+                    <h3 className="text-lg font-semibold text-gray-900 mb-3">Execute a Command in a Container</h3>
+                    <CodeBlock
+                      code={execExample}
+                      language="bash"
+                      id="exec-example"
                     />
                   </div>
 
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900 mb-3">JavaScript Example</h3>
-                    <CodeBlock 
-                      code={`const innoxus = require('@innoxus/sdk');
-
-const client = new innoxus.Client({
-  token: 'your-api-token'
-});
-
-// Create a new container
-const container = await client.containers.create({
-  name: 'my-web-app',
-  image: 'nginx:alpine',
-  ports: [{ host: 8080, container: 80 }]
-});
-
-console.log('Container created:', container.id);`} 
-                      language="javascript" 
-                      id="js-example" 
+                    <h3 className="text-lg font-semibold text-gray-900 mb-3">JavaScript (fetch)</h3>
+                    <CodeBlock
+                      code={jsExample}
+                      language="javascript"
+                      id="js-example"
                     />
+                  </div>
+
+                  <div className="bg-gray-50 rounded-xl p-6">
+                    <div className="flex items-start space-x-3">
+                      <Package className="w-5 h-5 text-gray-500 mt-0.5" />
+                      <p className="text-sm text-gray-600">
+                        Prefer a UI? Every service ships Swagger UI at <code className="bg-gray-100 px-1 rounded">/docs</code>{' '}
+                        (e.g. <code className="bg-gray-100 px-1 rounded">{CONTAINERS_BASE_URL}/docs</code>) where you can
+                        inspect schemas and fire requests without writing any code.
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>

@@ -1,17 +1,53 @@
-import React, { useState } from "react";
-import { Container, Menu, X, Code, LogOut, User, Settings } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { Container, Menu, X, Code, LogOut, User } from "lucide-react";
+
+const USER_API_URL = "http://localhost:5005/userData";
 
 export const NavbarRC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  
-  // Simulate getting current path - you can replace this with useLocation() hook
-  const currentPath = window.location.pathname;
-  
+  const [userEmail, setUserEmail] = useState(null);
+
+  const location = useLocation();
+  const currentPath = location.pathname;
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchUser = async () => {
+      try {
+        const response = await fetch(USER_API_URL, {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem("token")}`,
+          },
+        });
+        if (!response.ok) {
+          throw new Error(`User request failed with status ${response.status}`);
+        }
+        const raw = await response.json();
+        // Backend returns a JSON-encoded string (json_util.dumps)
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (isMounted) {
+          setUserEmail(parsed?.data?.email || null);
+        }
+      } catch (error) {
+        console.error("Failed to fetch user data for navbar:", error);
+      }
+    };
+
+    fetchUser();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const displayName = userEmail ? userEmail.split("@")[0] : null;
+
   const navLinks = [
     { to: "/", label: "Dashboard", icon: Container },
-    { to: "/nodesly", label: "Nodes", icon: Container },
-    { to: "/statify", label: "Analytics", icon: Container }
+    { to: "/nodesly", label: "Nodes", icon: Container }
   ];
 
   const handleLogout = () => {
@@ -34,15 +70,15 @@ export const NavbarRC = () => {
               <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
                 <Container className="w-4 h-4 text-white" />
               </div>
-              <span className="text-xl font-medium text-gray-900">Innoxus</span>
+              <span className="text-xl font-medium text-gray-900">Lattice</span>
             </div>
 
             {/* Desktop Navigation */}
             <div className="hidden md:flex items-center space-x-1">
               {navLinks.map((link) => (
-                <a
+                <Link
                   key={link.to}
-                  href={link.to}
+                  to={link.to}
                   className={`px-4 py-2 rounded-full text-sm font-medium transition-all duration-200 ${
                     isActiveLink(link.to)
                       ? "bg-black text-white"
@@ -50,15 +86,15 @@ export const NavbarRC = () => {
                   }`}
                 >
                   {link.label}
-                </a>
+                </Link>
               ))}
             </div>
 
             {/* Right side actions */}
             <div className="hidden md:flex items-center space-x-3">
-              {/* API Button - Updated to link to documentation */}
-              <a
-                href="/api-docs"
+              {/* API Button - links to documentation */}
+              <Link
+                to="/api-docs"
                 className={`flex items-center space-x-2 px-4 py-2 rounded-full transition-all duration-200 text-sm font-medium ${
                   isActiveLink('/api-docs')
                     ? "bg-black text-white"
@@ -67,7 +103,7 @@ export const NavbarRC = () => {
               >
                 <Code className="w-4 h-4" />
                 <span>API</span>
-              </a>
+              </Link>
 
               {/* Profile Dropdown */}
               <div className="relative">
@@ -82,18 +118,12 @@ export const NavbarRC = () => {
                 {isProfileOpen && (
                   <div className="absolute right-0 mt-2 w-48 bg-white rounded-2xl shadow-lg border border-gray-100 py-2">
                     <div className="px-4 py-3 border-b border-gray-100">
-                      <p className="text-sm font-medium text-gray-900">John Doe</p>
-                      <p className="text-xs text-gray-500">john@company.com</p>
+                      <p className="text-sm font-medium text-gray-900">
+                        {displayName || "—"}
+                      </p>
+                      <p className="text-xs text-gray-500">{userEmail || "—"}</p>
                     </div>
-                    
-                    <a
-                      href="/settings"
-                      className="flex items-center space-x-3 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                    >
-                      <Settings className="w-4 h-4" />
-                      <span>Settings</span>
-                    </a>
-                    
+
                     <button
                       onClick={handleLogout}
                       className="flex items-center space-x-3 px-4 py-2 text-sm text-red-600 hover:bg-red-50 w-full text-left"
@@ -125,9 +155,9 @@ export const NavbarRC = () => {
           <div className="md:hidden bg-white border-t border-gray-100">
             <div className="px-6 py-4 space-y-2">
               {navLinks.map((link) => (
-                <a
+                <Link
                   key={link.to}
-                  href={link.to}
+                  to={link.to}
                   onClick={() => setIsMenuOpen(false)}
                   className={`block px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
                     isActiveLink(link.to)
@@ -136,13 +166,13 @@ export const NavbarRC = () => {
                   }`}
                 >
                   {link.label}
-                </a>
+                </Link>
               ))}
-              
+
               {/* Mobile API and Profile */}
               <div className="pt-4 border-t border-gray-100 space-y-2">
-                <a
-                  href="/api-docs"
+                <Link
+                  to="/api-docs"
                   onClick={() => setIsMenuOpen(false)}
                   className={`flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 text-sm font-medium w-full ${
                     isActiveLink('/api-docs')
@@ -152,13 +182,8 @@ export const NavbarRC = () => {
                 >
                   <Code className="w-4 h-4" />
                   <span>API Documentation</span>
-                </a>
-                
-                <button className="flex items-center space-x-3 px-4 py-3 text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-xl transition-all duration-200 text-sm font-medium w-full">
-                  <Settings className="w-4 h-4" />
-                  <span>Settings</span>
-                </button>
-                
+                </Link>
+
                 <button
                   onClick={handleLogout}
                   className="flex items-center space-x-3 px-4 py-3 text-red-600 hover:bg-red-50 rounded-xl transition-all duration-200 text-sm font-medium w-full"
