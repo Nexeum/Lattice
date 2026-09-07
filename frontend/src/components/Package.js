@@ -34,7 +34,8 @@ import {
   BadgeCheck,
   Users,
   Plus,
-  Rocket
+  Rocket,
+  FlaskConical
 } from "lucide-react";
 import { authHeaders, getToken, redirectIfUnauthorized } from "../lib/api";
 import { toast } from "../lib/toast";
@@ -1621,6 +1622,11 @@ const ChangesetsPanel = ({
   const [openingId, setOpeningId] = useState(null);
   const [detailError, setDetailError] = useState(null);
   const [decidingAction, setDecidingAction] = useState(null);
+  // Preview environments, keyed by changeset id. Creating one is slow
+  // (~20-60s, spins up a DinD env) so the id being created is tracked too.
+  const [previews, setPreviews] = useState({});
+  const [previewingId, setPreviewingId] = useState(null);
+  const [destroyingId, setDestroyingId] = useState(null);
 
   useEffect(() => {
     onRefresh();
@@ -1646,6 +1652,65 @@ const ChangesetsPanel = ({
       setDetailError("Could not load that changeset. Please try again.");
     } finally {
       setOpeningId(null);
+    }
+  };
+
+  const handlePreview = async (changesetId) => {
+    if (previewingId) return;
+    setPreviewingId(changesetId);
+    try {
+      const response = await fetch(
+        `${CI_BASE}/preview/${packageId}/changesets/${changesetId}`,
+        { method: "POST", headers: { ...authHeaders() } }
+      );
+      if (!response.ok) {
+        if (redirectIfUnauthorized(response)) return;
+        let detail = `Could not create the preview environment (${response.status}).`;
+        try {
+          const body = await response.json();
+          if (body && body.detail) detail = body.detail;
+        } catch {
+          // Non-JSON error body: keep the generic message.
+        }
+        toast.error(detail);
+        return;
+      }
+      const data = await response.json();
+      setPreviews((prev) => ({ ...prev, [changesetId]: data }));
+    } catch (previewError) {
+      console.error("Error creating preview environment:", previewError);
+      toast.error("Could not create the preview environment. Please try again.");
+    } finally {
+      setPreviewingId(null);
+    }
+  };
+
+  // Tears down a preview env. In silent mode (post approve/reject cleanup)
+  // it is best-effort: no spinner, no toasts, failures are ignored.
+  const destroyPreview = async (changesetId, { silent = false } = {}) => {
+    const preview = previews[changesetId];
+    if (!preview || !preview.parent) return;
+    if (!silent) setDestroyingId(changesetId);
+    try {
+      const response = await fetch(
+        `${CI_BASE}/previews/${encodeURIComponent(preview.parent)}`,
+        { method: "DELETE", headers: { ...authHeaders() } }
+      );
+      if (!silent && !response.ok) {
+        throw new Error(`Preview destroy failed (${response.status})`);
+      }
+      setPreviews((prev) => {
+        const { [changesetId]: _removed, ...rest } = prev;
+        return rest;
+      });
+      if (!silent) toast.info("Preview environment destroyed");
+    } catch (destroyError) {
+      if (!silent) {
+        console.error("Error destroying preview environment:", destroyError);
+        toast.error("Could not destroy the preview environment.");
+      }
+    } finally {
+      if (!silent) setDestroyingId(null);
     }
   };
 
@@ -1678,6 +1743,11 @@ const ChangesetsPanel = ({
         toast.info("Changeset rejected");
         onRefresh();
       }
+      // Best-effort cleanup of any preview env for this changeset; do not
+      // block the main flow on it.
+      if (previews[selected._id]) {
+        destroyPreview(selected._id, { silent: true });
+      }
       setSelected(null);
     } catch (decisionError) {
       console.error("Error updating changeset:", decisionError);
@@ -1691,6 +1761,8 @@ const ChangesetsPanel = ({
     const changedFiles = Array.isArray(selected.files) ? selected.files : [];
     const created = formatCiTime(selected.created_at);
     const isPending = selected.status === "pending";
+    const activePreview = previews[selected._id] || null;
+    const creatingPreview = previewingId === selected._id;
     const resolvedBy = changesetResolvedBy(selected);
     const statusChipStyle =
       CHANGESET_STATUS_CHIP_STYLES[selected.status] ||
@@ -1723,6 +1795,24 @@ const ChangesetsPanel = ({
           </div>
           {isPending && (
             <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => handlePreview(selected._id)}
+                disabled={
+                  previewingId != null || activePreview != null || decidingAction != null
+                }
+                className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors ${
+                  previewingId != null || activePreview != null || decidingAction != null
+                    ? "opacity-60 pointer-events-none"
+                    : ""
+                }`}
+              >
+                {creatingPreview ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <FlaskConical className="w-4 h-4" />
+                )}
+                <span>{creatingPreview ? "Creando..." : "Preview"}</span>
+              </button>
               <button
                 onClick={() => handleDecision("approve")}
                 disabled={decidingAction != null}
@@ -1759,6 +1849,59 @@ const ChangesetsPanel = ({
           )}
         </div>
         <div className="p-4 space-y-4">
+          {creatingPreview && (
+            <div className="flex items-center gap-3 px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-700">
+              <Loader2 className="w-4 h-4 animate-spin text-gray-500 shrink-0" />
+              <span>Creando entorno de preview… esto puede tardar hasta un minuto.</span>
+            </div>
+          )}
+          {activePreview && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-sm text-emerald-800">
+                  Preview environment{" "}
+                  <code className="px-1.5 py-0.5 bg-emerald-100 rounded font-mono text-[13px]">
+                    {activePreview.parent}
+                  </code>{" "}
+                  running — expira en ~{activePreview.expires_in_minutes ?? 60} min
+                </p>
+                <button
+                  onClick={() => destroyPreview(selected._id)}
+                  disabled={destroyingId === selected._id}
+                  className="text-sm font-medium text-emerald-700 hover:text-emerald-900 underline shrink-0 disabled:opacity-60"
+                >
+                  {destroyingId === selected._id
+                    ? "Destroying…"
+                    : "Destroy preview"}
+                </button>
+              </div>
+              {activePreview.kind === "stack" &&
+                Array.isArray(activePreview.deployed) && (
+                  <ul className="space-y-1">
+                    {activePreview.deployed.map((service) => (
+                      <li
+                        key={service.name}
+                        className="flex items-center gap-2 text-sm text-emerald-800 min-w-0"
+                      >
+                        {service.ok ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        ) : (
+                          <XCircle className="w-4 h-4 text-red-500 shrink-0" />
+                        )}
+                        <span className="font-mono text-[13px] shrink-0">
+                          {service.name}
+                        </span>
+                        {service.output && (
+                          <span className="text-xs text-emerald-700/80 truncate">
+                            {service.output}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+            </div>
+          )}
           {changedFiles.length > 0 ? (
             changedFiles.map((file) => {
               const current = (Array.isArray(packageFiles) ? packageFiles : []).find(

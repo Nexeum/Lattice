@@ -11,9 +11,13 @@ import {
   AlertTriangle,
   X,
   Search,
-  ArrowRight
+  ArrowRight,
+  Sparkles,
+  ChevronDown,
+  ChevronRight
 } from "lucide-react";
 import { authHeaders, redirectIfUnauthorized } from "../lib/api";
+import { toast } from "../lib/toast";
 
 const PACKAGES_API = "http://localhost:5003";
 const ENGINE_API = "http://localhost:5001";
@@ -42,6 +46,13 @@ export const Dashboard = () => {
 
   const [searchTerm, setSearchTerm] = useState("");
   const [languageFilter, setLanguageFilter] = useState("all");
+
+  // App Catalog: hidden entirely when the backend endpoint is missing/erroring.
+  const [catalogItems, setCatalogItems] = useState([]);
+  const [installedKeys, setInstalledKeys] = useState({});
+  const [installingKey, setInstallingKey] = useState(null);
+  // null = "no explicit choice yet" — default derives from the plugin count.
+  const [catalogToggle, setCatalogToggle] = useState(null);
 
   const fetchPackages = useCallback(async () => {
     setPackagesLoading(true);
@@ -106,11 +117,63 @@ export const Dashboard = () => {
     }
   }, []);
 
+  const fetchCatalog = useCallback(async () => {
+    try {
+      const response = await fetch(`${PACKAGES_API}/catalog`, {
+        headers: { ...authHeaders() }
+      });
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        // Endpoint not deployed yet (404) or failing: hide the section.
+        setCatalogItems([]);
+        return;
+      }
+      const data = await response.json();
+      setCatalogItems(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Error fetching catalog:", error);
+      setCatalogItems([]);
+    }
+  }, []);
+
   useEffect(() => {
     fetchPackages();
     fetchContainers();
     fetchTopology();
-  }, [fetchPackages, fetchContainers, fetchTopology]);
+    fetchCatalog();
+  }, [fetchPackages, fetchContainers, fetchTopology, fetchCatalog]);
+
+  const handleInstall = async (item) => {
+    if (installingKey) return;
+    setInstallingKey(item.key);
+    try {
+      const response = await fetch(
+        `${PACKAGES_API}/catalog/${encodeURIComponent(item.key)}/install`,
+        { method: "POST", headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      if (response.status === 409) {
+        // Already installed server-side: mark quietly, no toast.
+        setInstalledKeys((prev) => ({ ...prev, [item.key]: true }));
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`Install request failed (${response.status})`);
+      }
+      setInstalledKeys((prev) => ({ ...prev, [item.key]: true }));
+      toast.success(
+        item.kind === "lab"
+          ? `${item.name} instalado — ábrelo en un workspace → Labs`
+          : `${item.name} instalado — despliégalo desde un workspace`
+      );
+      await fetchPackages();
+    } catch (error) {
+      console.error("Error installing catalog item:", error);
+      toast.error(`No se pudo instalar ${item.name}. Inténtalo de nuevo.`);
+    } finally {
+      setInstallingKey(null);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -198,6 +261,23 @@ export const Dashboard = () => {
 
   const infraErrors = [containersError, networksError].filter(Boolean);
 
+  // Catalog items whose name matches an existing package read as installed.
+  const installedNames = new Set(
+    packages.map((pkg) => (pkg.name || "").toLowerCase()).filter(Boolean)
+  );
+  const isItemInstalled = (item) =>
+    Boolean(installedKeys[item.key]) ||
+    installedNames.has((item.name || "").toLowerCase());
+  const catalogExpanded =
+    catalogToggle === null ? packages.length < 4 : catalogToggle;
+
+  const catalogServicesLine = (item) =>
+    Array.isArray(item.services) && item.services.length > 0
+      ? item.services
+          .map((service) => `${service.name} ×${service.replicas} · ${service.image}`)
+          .join(", ")
+      : null;
+
   return (
     <div className="min-h-screen bg-gray-50 pt-16">
       <div className="max-w-7xl mx-auto px-6 py-8">
@@ -256,6 +336,95 @@ export const Dashboard = () => {
             </div>
           )}
         </div>
+
+        {/* App Catalog */}
+        {catalogItems.length > 0 && (
+          <div className="bg-white rounded-3xl shadow-sm border border-gray-100 mb-8">
+            <button
+              onClick={() => setCatalogToggle(!catalogExpanded)}
+              className="w-full flex items-center justify-between p-6 text-left"
+            >
+              <div className="flex items-center space-x-2">
+                <Sparkles className="w-5 h-5 text-gray-500" />
+                <h2 className="text-xl font-medium text-gray-900">App Catalog</h2>
+                <span className="text-sm text-gray-500">
+                  {catalogItems.length} {catalogItems.length === 1 ? "app" : "apps"}
+                </span>
+              </div>
+              {catalogExpanded ? (
+                <ChevronDown className="w-5 h-5 text-gray-400" />
+              ) : (
+                <ChevronRight className="w-5 h-5 text-gray-400" />
+              )}
+            </button>
+
+            {catalogExpanded && (
+              <div className="px-6 pb-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {catalogItems.map((item) => {
+                  const installed = isItemInstalled(item);
+                  const installing = installingKey === item.key;
+                  const servicesLine = catalogServicesLine(item);
+                  return (
+                    <div
+                      key={item.key}
+                      className="flex flex-col p-5 border border-gray-100 rounded-2xl hover:border-gray-200 hover:shadow-md transition-all duration-200"
+                    >
+                      <div className="flex items-start justify-between mb-3">
+                        <span className="text-3xl leading-none">{item.icon}</span>
+                        <div className="flex items-center flex-wrap justify-end gap-1.5">
+                          {item.category && (
+                            <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-[11px] font-medium">
+                              {item.category}
+                            </span>
+                          )}
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                              item.kind === "lab"
+                                ? "bg-emerald-50 text-emerald-700"
+                                : "bg-purple-50 text-purple-700"
+                            }`}
+                          >
+                            {item.kind}
+                          </span>
+                        </div>
+                      </div>
+                      <h3 className="text-base font-medium text-gray-900 mb-1">
+                        {item.name}
+                      </h3>
+                      {item.description && (
+                        <p className="text-sm text-gray-600 line-clamp-2 mb-4">
+                          {item.description}
+                        </p>
+                      )}
+                      <div className="mt-auto flex items-center justify-between gap-3">
+                        <span className="text-[11px] font-mono text-gray-500 truncate">
+                          {item.kind === "lab"
+                            ? `${item.steps ?? 0} steps`
+                            : servicesLine}
+                        </span>
+                        <button
+                          onClick={() => handleInstall(item)}
+                          disabled={installed || installing}
+                          className={`px-3 py-1.5 rounded-full text-xs font-medium shrink-0 transition-colors ${
+                            installed
+                              ? "bg-gray-100 text-gray-500 cursor-default"
+                              : "bg-black text-white hover:bg-gray-800 disabled:opacity-60"
+                          }`}
+                        >
+                          {installed
+                            ? "Installed ✓"
+                            : installing
+                              ? "Installing…"
+                              : "Install"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Packages Section */}
         <div className="bg-white rounded-3xl shadow-sm border border-gray-100">
@@ -323,9 +492,17 @@ export const Dashboard = () => {
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <div className="flex items-center flex-wrap gap-2 mb-2">
+                          {pkg.icon && (
+                            <span className="text-xl leading-none">{pkg.icon}</span>
+                          )}
                           <h3 className="text-lg font-medium text-gray-900 group-hover:text-black">
                             {pkg.name || "Unnamed plugin"}
                           </h3>
+                          {pkg.official && (
+                            <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded-full text-[11px] font-medium">
+                              official
+                            </span>
+                          )}
                           {pkg.type && (
                             <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
                               {pkg.type}

@@ -1,6 +1,6 @@
 name: lattice
 
-# Shared settings for the four Python services (one image, different commands).
+# Shared settings for the five Python services (one image, different commands).
 x-backend: &backend
   build: ./backend
   image: lattice-backend
@@ -64,6 +64,22 @@ services:
     environment:
       <<: *backend-env
       # The packages service triggers CI runs on the containers service
+      LATTICE_CONTAINERS_URL: http://containers:5001
+
+  tars:
+    <<: *backend
+    command: ["uvicorn", "tars:app", "--host", "0.0.0.0", "--port", "5004"]
+    ports:
+      - "5004:5004"
+    environment:
+      <<: *backend-env
+      # OpenAI-compatible LLM endpoint for the Tars assistant. From inside
+      # compose, Ollama running on the host is reached via host.docker.internal.
+      LATTICE_AI_URL: ${LATTICE_AI_URL:-http://host.docker.internal:11434/v1}
+      LATTICE_AI_MODEL: ${LATTICE_AI_MODEL:-}
+      # Optional API key for hosted OpenAI-compatible providers (Ollama ignores it)
+      LATTICE_AI_KEY: ${LATTICE_AI_KEY:-}
+      # Tars gathers live platform context from the containers service
       LATTICE_CONTAINERS_URL: http://containers:5001
 
   frontend:

@@ -20,6 +20,7 @@ Local Docker orchestration platform. Manage workspaces backed by Docker-in-Docke
 | `backend/container.py` | 5001 | Docker engine API: containers, DinD nodes, exec, metrics, topology, plugin installs, CI runs |
 | `backend/room.py` | 5002 | Workspaces CRUD (MongoDB) |
 | `backend/package.py` | 5003 | Plugin registry (MongoDB + GridFS) |
+| `backend/tars.py` | 5004 | Tars — AI ops assistant (local LLM via OpenAI-compatible API, live platform context) |
 | `frontend/` | 3000 | React dashboard (Vite + Tailwind) |
 
 > Port 5000 is intentionally avoided: macOS AirPlay Receiver occupies it.
@@ -53,20 +54,26 @@ Register a user from the UI and sign in. Every backend service exposes Swagger d
 
 ## Docker Compose
 
-The whole stack (MongoDB + the four backend services + the frontend) can run in containers:
+The whole stack (MongoDB + the five backend services + the frontend) can run in containers:
 
 ```bash
 cp .env.example .env      # set LATTICE_SECRET_KEY (and DOCKER_SOCK if you use colima)
 docker compose up --build
 ```
 
-Services and host ports match the table above: frontend on http://localhost:3000, auth on 5005, containers on 5001, rooms on 5002, packages on 5003, MongoDB on 27017 (persisted in the `mongo_data` named volume). No separate MongoDB install is needed in this mode.
+Services and host ports match the table above: frontend on http://localhost:3000, auth on 5005, containers on 5001, rooms on 5002, packages on 5003, tars on 5004, MongoDB on 27017 (persisted in the `mongo_data` named volume). No separate MongoDB install is needed in this mode.
 
 Notes:
 
 - **Docker socket:** the `containers` service orchestrates the **host** Docker daemon, so it mounts the host socket. Docker Desktop / Linux users need nothing extra (`/var/run/docker.sock` is the default). colima users must set `DOCKER_SOCK=~/.colima/default/docker.sock` in `.env`.
 - **Same-machine browsing only:** the frontend bundle calls the APIs at hardcoded `http://localhost:5001-5005` URLs. Since compose publishes those ports 1:1 on the host, everything works when you browse from the machine running compose — which is the intended use case. Accessing the dashboard from another machine won't work without further changes.
 - All backend services share one image (`backend/Dockerfile`); each compose service just overrides the `uvicorn` command.
+
+## Tars (AI assistant)
+
+Tars (`backend/tars.py`, port 5004) is Lattice's AI ops assistant, backed by any OpenAI-compatible LLM — by default a free local Ollama (`brew install ollama` or https://ollama.com, then `ollama pull llama3.2`).
+Point `LATTICE_AI_URL` elsewhere (LM Studio, llama.cpp, vLLM, hosted providers with an optional `LATTICE_AI_KEY`) and pick a model with `LATTICE_AI_MODEL`; without a reachable endpoint `/chat` returns 503 with setup instructions.
+Ask it about your containers, deployments, recent events and host health: it answers from the live platform state it fetches from the containers service on every request.
 
 ## CLI
 

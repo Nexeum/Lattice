@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import gridfs
 from gridfs.errors import NoFile
 import io
+import json
 import os
 import tarfile
 import requests
@@ -507,3 +508,258 @@ async def download_release(package_id: str, release_id: str, user=Depends(requir
         media_type="application/gzip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+# ---------------------------------------------------------------------------
+# Catalog (curated one-click templates)
+# ---------------------------------------------------------------------------
+# Pure data. Every image runs with zero env/config; shell values (none used)
+# must be a single token because the deployer appends them to `docker run`.
+
+CATALOG = [
+    {
+        "key": "web-nginx",
+        "name": "Nginx Web Server",
+        "description": "Two nginx replicas with an HTTP health probe, restarted automatically.",
+        "icon": "\U0001F310",  # globe
+        "category": "Web",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "web",
+                        "image": "nginx:alpine",
+                        "replicas": 2,
+                        "restart": "always",
+                        "probe": {"type": "http", "port": 80, "path": "/"},
+                    }
+                ]
+            }, indent=2),
+            "README.md": (
+                "# Nginx Web Server\n\n"
+                "Deploys 2 replicas of `nginx:alpine` with `restart: always`.\n\n"
+                "Each replica has an HTTP health probe on port 80 (`/`), so the\n"
+                "reconciler will replace any replica that stops answering.\n"
+            ),
+        },
+    },
+    {
+        "key": "redis-cache",
+        "name": "Redis Cache",
+        "description": "A single Redis instance with a TCP health probe on port 6379.",
+        "icon": "⚡",  # high voltage
+        "category": "Databases",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "redis",
+                        "image": "redis:alpine",
+                        "replicas": 1,
+                        "restart": "always",
+                        "probe": {"type": "tcp", "port": 6379},
+                    }
+                ]
+            }, indent=2),
+            "README.md": (
+                "# Redis Cache\n\n"
+                "Deploys 1 replica of `redis:alpine` with `restart: always`.\n\n"
+                "A TCP health probe on port 6379 keeps the instance monitored;\n"
+                "Redis runs with its default config and needs no environment.\n"
+            ),
+        },
+    },
+    {
+        "key": "uptime-kuma",
+        "name": "Uptime Kuma",
+        "description": "Self-hosted uptime monitoring dashboard, running out of the box.",
+        "icon": "\U0001F4C8",  # chart increasing
+        "category": "Monitoring",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "kuma",
+                        "image": "louislam/uptime-kuma:1",
+                        "replicas": 1,
+                        "restart": "always",
+                    }
+                ]
+            }, indent=2),
+            "README.md": (
+                "# Uptime Kuma\n\n"
+                "Deploys 1 replica of `louislam/uptime-kuma:1` with `restart: always`.\n\n"
+                "Uptime Kuma is a self-hosted monitoring tool with a web UI on\n"
+                "port 3001. It requires no environment variables to start.\n"
+            ),
+        },
+    },
+    {
+        "key": "httpd-static",
+        "name": "Apache httpd",
+        "description": "Apache httpd serving its default static site.",
+        "icon": "\U0001F4C4",  # page facing up
+        "category": "Web",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "httpd",
+                        "image": "httpd:alpine",
+                        "replicas": 1,
+                        "restart": "always",
+                    }
+                ]
+            }, indent=2),
+            "README.md": (
+                "# Apache httpd\n\n"
+                "Deploys 1 replica of `httpd:alpine` with `restart: always`.\n\n"
+                "Serves the default \"It works!\" page on port 80 with zero\n"
+                "configuration.\n"
+            ),
+        },
+    },
+    {
+        "key": "whoami-lb",
+        "name": "Whoami Load Balancer Demo",
+        "description": "Three whoami replicas with CPU autoscaling (2-5) - the reconciler demo.",
+        "icon": "\U0001F500",  # shuffle
+        "category": "Demos",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "whoami",
+                        "image": "traefik/whoami:latest",
+                        "replicas": 3,
+                        "restart": "always",
+                        "autoscale": {"min": 2, "max": 5, "targetCPU": 70},
+                    }
+                ]
+            }, indent=2),
+            "README.md": (
+                "# Whoami Load Balancer Demo\n\n"
+                "Deploys 3 replicas of `traefik/whoami:latest`, each answering HTTP\n"
+                "on port 80 with its own container identity.\n\n"
+                "The service declares `autoscale: {min: 2, max: 5, targetCPU: 70}`,\n"
+                "so the reconciler will scale the replica count between 2 and 5\n"
+                "based on CPU usage - a live demo of autoscaling.\n"
+            ),
+        },
+    },
+    {
+        "key": "docker-101",
+        "name": "Docker 101",
+        "description": "A guided hands-on lab: run, inspect and remove your first container.",
+        "icon": "\U0001F393",  # graduation cap
+        "category": "Learning",
+        "kind": "lab",
+        "files": {
+            "lab.json": json.dumps({
+                "title": "Docker 101",
+                "steps": [
+                    {
+                        "title": "Run your first container",
+                        "instructions": "Open the Terminal and run:\n\n    docker run -d --name hello nginx:alpine\n",
+                        "check": "docker ps --format '{{.Names}}' | grep -q '^hello$'",
+                    },
+                    {
+                        "title": "Inspect it",
+                        "instructions": "Find its IP:\n\n    docker inspect hello\n",
+                        "check": "docker inspect hello >/dev/null 2>&1",
+                    },
+                    {
+                        "title": "Clean up",
+                        "instructions": "Remove it:\n\n    docker rm -f hello\n",
+                        "check": "! docker ps -a --format '{{.Names}}' | grep -q '^hello$'",
+                    },
+                ],
+            }, indent=2),
+            "README.md": (
+                "# Docker 101 (Lab)\n\n"
+                "A three-step guided lab that teaches the basic container\n"
+                "lifecycle:\n\n"
+                "1. **Run your first container** - start an nginx container named `hello`.\n"
+                "2. **Inspect it** - use `docker inspect` to look at its details.\n"
+                "3. **Clean up** - remove the container with `docker rm -f`.\n\n"
+                "Each step has an automatic check command that verifies your work\n"
+                "before letting you move on.\n"
+            ),
+        },
+    },
+]
+
+CATALOG_BY_KEY = {entry["key"]: entry for entry in CATALOG}
+
+def catalog_entry_summary(entry):
+    """Public view of a catalog entry: no file contents, plus a small preview
+    (services for stacks, step count for labs) parsed from the entry itself."""
+    summary = {
+        "key": entry["key"],
+        "name": entry["name"],
+        "description": entry["description"],
+        "icon": entry["icon"],
+        "category": entry["category"],
+        "kind": entry["kind"],
+    }
+    if entry["kind"] == "stack":
+        parsed = json.loads(entry["files"]["stack.json"])
+        summary["services"] = [
+            {
+                "name": service.get("name"),
+                "image": service.get("image"),
+                "replicas": service.get("replicas", 1),
+            }
+            for service in parsed.get("services", [])
+        ]
+    else:
+        parsed = json.loads(entry["files"]["lab.json"])
+        summary["steps"] = len(parsed.get("steps", []))
+    return summary
+
+@app.get("/catalog")
+async def get_catalog(user=Depends(require_user)):
+    return [catalog_entry_summary(entry) for entry in CATALOG]
+
+@app.post("/catalog/{key}/install")
+async def install_catalog_entry(key: str, user=Depends(require_user)):
+    entry = CATALOG_BY_KEY.get(key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Catalog entry not found")
+
+    if collection.find_one({"name": entry["name"]}) is not None:
+        raise HTTPException(status_code=409, detail="Already installed")
+
+    package = {
+        "name": entry["name"],
+        "description": entry["description"],
+        "icon": entry["icon"],
+        "category": entry["category"],
+        "owner": user["user_id"],
+        "official": True,
+        "tags": ["official", entry["kind"]],
+        "version": "1.0.0",
+        "stars": 0,
+        "files": [],
+    }
+    result = collection.insert_one(package)
+    package_id = str(result.inserted_id)
+
+    # Store files exactly like uploads (namespaced GridFS), but without CI.
+    file_infos = []
+    for name, content in entry["files"].items():
+        data = content.encode("utf-8")
+        fs.put(data, filename=namespaced_filename(package_id, name))
+        file_infos.append({"name": name, "size": len(data)})
+
+    collection.update_one(
+        {"_id": result.inserted_id},
+        {"$set": {"files": file_infos}},
+    )
+
+    installed = collection.find_one({"_id": result.inserted_id})
+    return serialize_package_with_files(installed)

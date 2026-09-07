@@ -28,7 +28,11 @@ import {
   CheckCircle,
   XCircle,
   Gauge,
-  History
+  History,
+  Globe,
+  Code,
+  LayoutGrid,
+  Wrench
 } from 'lucide-react';
 import { Line } from 'react-chartjs-2';
 import {
@@ -47,6 +51,9 @@ import {
   clearWorkspaceInfo,
   onWorkspaceAction
 } from '../lib/workspaceBridge';
+import { SnapshotsPanel } from './SnapshotsPanel';
+import { LabsPanel } from './LabsPanel';
+import { GithubDeployCard } from './GithubDeployCard';
 
 ChartJS.register(
   CategoryScale,
@@ -761,28 +768,29 @@ const EventsSection = ({ parentName, active }) => {
             <p className="text-sm text-gray-400 py-2">No events yet.</p>
           ) : (
             events.map((event, index) => (
+              // Stacked layout: the column is narrow, so time + type go on one
+              // line and the message flows full-width underneath. Actor lives
+              // in the tooltip to keep rows compact.
               <div
                 key={`${event?.ts || 'event'}-${index}`}
-                className="flex items-start space-x-2 min-w-0"
+                className="min-w-0 pb-2 border-b border-gray-50 last:border-b-0"
+                title={event?.actor ? `by ${event.actor}` : undefined}
               >
-                <span className="text-xs text-gray-400 font-mono flex-shrink-0 pt-0.5 w-16">
-                  {event?.ts ? new Date(event.ts).toLocaleTimeString() : '—'}
-                </span>
-                <span
-                  className={`px-1.5 py-0.5 rounded-md border text-[10px] font-mono flex-shrink-0 ${eventTypeClass(
-                    event?.type
-                  )}`}
-                >
-                  {event?.type || 'event'}
-                </span>
-                <span className="text-sm text-gray-700 min-w-0 break-words flex-1">
-                  {event?.message || ''}
-                </span>
-                {event?.actor ? (
-                  <span className="text-xs text-gray-400 font-mono flex-shrink-0 pt-0.5">
-                    {event.actor}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[11px] text-gray-400 font-mono flex-shrink-0">
+                    {event?.ts ? new Date(event.ts).toLocaleTimeString() : '—'}
                   </span>
-                ) : null}
+                  <span
+                    className={`px-1.5 py-0.5 rounded-md border text-[10px] font-mono ${eventTypeClass(
+                      event?.type
+                    )}`}
+                  >
+                    {event?.type || 'event'}
+                  </span>
+                </div>
+                <p className="text-sm text-gray-700 break-words mt-0.5">
+                  {event?.message || ''}
+                </p>
               </div>
             ))
           )}
@@ -791,6 +799,43 @@ const EventsSection = ({ parentName, active }) => {
     </div>
   );
 };
+
+/* ------------------------------------------------------------- Tab bar --- */
+
+const ROOM_TABS = [
+  { id: 'overview', label: 'Overview', icon: LayoutGrid },
+  { id: 'observability', label: 'Observability', icon: Activity },
+  { id: 'ops', label: 'Ops', icon: Wrench }
+];
+
+/**
+ * In-page tab bar (underline / pill style). Active tab is black text with a
+ * black underline; inactive tabs are gray. Purely presentational — the caller
+ * owns the active-tab state and keeps every panel mounted (CSS hidden toggle)
+ * so long-lived sockets/polling survive tab switches.
+ */
+const RoomTabs = ({ activeTab, onSelect }) => (
+  <div className="flex items-center gap-1 border-b border-gray-200 mb-6">
+    {ROOM_TABS.map((tab) => {
+      const Icon = tab.icon;
+      const active = activeTab === tab.id;
+      return (
+        <button
+          key={tab.id}
+          onClick={() => onSelect(tab.id)}
+          className={`flex items-center space-x-2 px-4 py-2.5 text-sm font-semibold -mb-px border-b-2 transition-all duration-200 ${
+            active
+              ? 'text-gray-900 border-black'
+              : 'text-gray-400 border-transparent hover:text-gray-600'
+          }`}
+        >
+          <Icon className="w-4 h-4" />
+          <span>{tab.label}</span>
+        </button>
+      );
+    })}
+  </div>
+);
 
 export const Room = () => {
   const { id } = useParams();
@@ -843,12 +888,26 @@ export const Room = () => {
 
   const [panelView, setPanelView] = useState('terminal'); // 'terminal' | 'logs'
 
+  // In-page tab bar for the running-state content.
+  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'observability' | 'ops'
+
   const [openModalDeploy, setOpenModalDeploy] = useState(false);
   const [selectedStackId, setSelectedStackId] = useState('');
   const [deployHost, setDeployHost] = useState('auto'); // 'auto' | 'workspace'
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState(null);
   const [deploymentsRefresh, setDeploymentsRefresh] = useState(0);
+
+  // Expose UI (local-only): host-port exposures for children of this parent.
+  const [exposures, setExposures] = useState([]);
+  const [exposeForm, setExposeForm] = useState(null); // { child, port } | null
+  const [exposingChild, setExposingChild] = useState(null);
+  const [unexposingId, setUnexposingId] = useState(null);
+  const exposuresRequestRef = useRef(0);
+
+  // Open-in-editor (code-server inside the parent; local-only).
+  const [editorUrl, setEditorUrl] = useState(null);
+  const [editorOpening, setEditorOpening] = useState(false);
 
   const parentId = parent?.ID || null;
   const parentRunning = Boolean(parent && isRunning(parent.Status));
@@ -1038,6 +1097,36 @@ export const Room = () => {
     }
   }, [withHost]);
 
+  /* ------------------------------------------------------- Expose UI ---- */
+
+  // Exposing ports on the host only makes sense for the local daemon.
+  const exposeEnabled = !roomHost;
+
+  const fetchExposures = useCallback(async () => {
+    const token = exposuresRequestRef.current + 1;
+    exposuresRequestRef.current = token;
+    try {
+      const response = await fetch(
+        `${CONTAINERS_API}/exposures?parent=${encodeURIComponent(parentName)}`,
+        { headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`exposures responded with ${response.status}`);
+      }
+      const body = await response.json();
+      if (exposuresRequestRef.current === token) {
+        setExposures(Array.isArray(body) ? body : []);
+      }
+    } catch (err) {
+      /* Graceful degradation: endpoint may not exist yet → no expose chips. */
+      if (exposuresRequestRef.current === token) {
+        setExposures([]);
+      }
+    }
+  }, [parentName]);
+
+  /* Children and their exposures load together whenever the parent runs. */
   useEffect(() => {
     if (parentId && parentRunning) {
       fetchChildren(parentId);
@@ -1045,7 +1134,148 @@ export const Room = () => {
       setChildren([]);
       setSelectedChild(null);
     }
-  }, [parentId, parentRunning, fetchChildren]);
+    if (parentId && parentRunning && exposeEnabled) {
+      fetchExposures();
+    } else {
+      exposuresRequestRef.current += 1;
+      setExposures([]);
+      setExposeForm(null);
+    }
+  }, [parentId, parentRunning, exposeEnabled, fetchChildren, fetchExposures]);
+
+  /** Expose a child's port on the host through the parent. */
+  const exposeChild = async (childName) => {
+    if (!parentId || !childName || exposingChild) return;
+    const port = Number.parseInt(exposeForm?.port, 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      toast.error('Enter a valid port between 1 and 65535.');
+      return;
+    }
+    setExposingChild(childName);
+    try {
+      const response = await fetch(
+        `${CONTAINERS_API}/container/${encodeURIComponent(
+          parentId
+        )}/expose/${encodeURIComponent(childName)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ port })
+        }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (parseErr) {
+        console.error('Could not parse expose response:', parseErr);
+      }
+      if (!response.ok) {
+        throw new Error(
+          String(body?.detail || body?.error || `expose failed with ${response.status}`)
+        );
+      }
+      toast.success(`Expuesto en ${body?.url || `:${body?.hostPort ?? port}`}`);
+      setExposeForm(null);
+      fetchExposures();
+    } catch (err) {
+      console.error('Error exposing child container:', err);
+      toast.error(`Could not expose ${childName}.`);
+    } finally {
+      setExposingChild(null);
+    }
+  };
+
+  /** Remove an exposure (no confirmation required). */
+  const unexposeChild = async (exposure) => {
+    if (!exposure?.id || unexposingId) return;
+    setUnexposingId(exposure.id);
+    try {
+      const response = await fetch(
+        `${CONTAINERS_API}/exposures/${encodeURIComponent(exposure.id)}`,
+        { method: 'DELETE', headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      if (!response.ok) {
+        throw new Error(`unexpose responded with ${response.status}`);
+      }
+      setExposures((prev) => prev.filter((item) => item.id !== exposure.id));
+    } catch (err) {
+      console.error('Error removing exposure:', err);
+      toast.error('Could not remove the exposure.');
+    } finally {
+      setUnexposingId(null);
+    }
+  };
+
+  /* --------------------------------------------------- Open in editor ---- */
+
+  /* Pre-populate the editor URL once when the parent becomes running. */
+  useEffect(() => {
+    if (!parentId || !parentRunning || roomHost) {
+      setEditorUrl(null);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(
+          `${CONTAINERS_API}/container/${encodeURIComponent(parentId)}/editor`,
+          { headers: { ...authHeaders() } }
+        );
+        if (redirectIfUnauthorized(response)) return;
+        if (!response.ok) {
+          throw new Error(`editor responded with ${response.status}`);
+        }
+        const body = await response.json();
+        if (!cancelled && body?.exists && typeof body.url === 'string') {
+          setEditorUrl(body.url);
+        }
+      } catch (err) {
+        /* Graceful degradation: endpoint may not exist yet → button still works. */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [parentId, parentRunning, roomHost]);
+
+  /** Open the workspace editor; provisions code-server on first use (slow). */
+  const openEditor = async () => {
+    if (!parentId || editorOpening) return;
+    if (editorUrl) {
+      window.open(editorUrl, '_blank', 'noopener');
+      return;
+    }
+    setEditorOpening(true);
+    toast.info('Preparando el editor… la primera vez descarga ~350MB');
+    try {
+      const response = await fetch(
+        `${CONTAINERS_API}/container/${encodeURIComponent(parentId)}/editor`,
+        { method: 'POST', headers: { ...authHeaders() } }
+      );
+      if (redirectIfUnauthorized(response)) return;
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (parseErr) {
+        console.error('Could not parse editor response:', parseErr);
+      }
+      if (!response.ok || typeof body?.url !== 'string') {
+        throw new Error(
+          String(body?.detail || body?.error || `editor failed with ${response.status}`)
+        );
+      }
+      setEditorUrl(body.url);
+      toast.success('Editor listo');
+      window.open(body.url, '_blank', 'noopener');
+    } catch (err) {
+      console.error('Error preparing the editor:', err);
+      toast.error('Could not prepare the editor. Try again.');
+    } finally {
+      setEditorOpening(false);
+    }
+  };
 
   /**
    * Probe a child for its own children (grandchildren). Children only have
@@ -1629,9 +1859,22 @@ export const Room = () => {
         {lifecycleCard ? (
           lifecycleCard
         ) : (
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-            {/* Left column: deployment + containers + events */}
-            <div className="xl:col-span-1 space-y-6">
+          <>
+            {/* In-page tab bar: Overview · Observability · Ops */}
+            <RoomTabs activeTab={activeTab} onSelect={setActiveTab} />
+
+            {/* Tab panels are kept mounted and toggled with CSS `hidden` so the
+                terminal websocket, log stream and each section's polling survive
+                tab switches (no unmount / remount on every tab change). */}
+
+            {/* -------------------------------------------------- Overview --- */}
+            <div
+              className={`grid grid-cols-1 xl:grid-cols-3 gap-8 ${
+                activeTab === 'overview' ? '' : 'hidden'
+              }`}
+            >
+              {/* Left column: deployment + containers */}
+              <div className="xl:col-span-1 space-y-6">
               {/* Deployment (k8s-style desired vs running; hidden when absent) */}
               <DeploymentSection
                 parentName={parentName}
@@ -1706,6 +1949,13 @@ export const Room = () => {
                   {children.map((child) => {
                     const childSelected = selectedChild?.ID === child.ID;
                     const grandState = grandchildrenByChild[child.ID];
+                    const childLabel = child.Name || child.ID;
+                    const exposure = exposeEnabled
+                      ? exposures.find((item) => item?.child === childLabel) || null
+                      : null;
+                    const exposeFormOpen =
+                      exposeEnabled && !exposure && exposeForm?.child === childLabel;
+                    const isExposing = exposingChild === childLabel;
                     return (
                       <div key={child.ID}>
                         <button
@@ -1736,6 +1986,87 @@ export const Room = () => {
                             <span>{child.IP || 'no IP'}</span>
                           </div>
                         </button>
+
+                        {/* Expose on host (local daemon only) */}
+                        {exposeEnabled && (
+                          <div className="flex items-center flex-wrap gap-1.5 mt-1.5 pl-4">
+                            {exposure ? (
+                              <>
+                                <a
+                                  href={exposure.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title={`Open ${exposure.url}`}
+                                  className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full border border-green-200 bg-green-50 text-green-600 text-[11px] font-mono hover:bg-green-100 transition-colors"
+                                >
+                                  <span>:{exposure.hostPort} ↗</span>
+                                </a>
+                                <button
+                                  onClick={() => unexposeChild(exposure)}
+                                  disabled={unexposingId === exposure.id}
+                                  title="Remove exposure"
+                                  className="w-5 h-5 flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-md transition-all duration-200 disabled:opacity-40"
+                                >
+                                  {unexposingId === exposure.id ? (
+                                    <Loader className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <X className="w-3 h-3" />
+                                  )}
+                                </button>
+                              </>
+                            ) : exposeFormOpen ? (
+                              <>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="65535"
+                                  value={exposeForm.port}
+                                  onChange={(event) =>
+                                    setExposeForm((prev) => ({
+                                      ...prev,
+                                      port: event.target.value
+                                    }))
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Enter') exposeChild(childLabel);
+                                  }}
+                                  disabled={isExposing}
+                                  placeholder="80"
+                                  className="w-20 px-2 py-1 rounded-lg border border-gray-200 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-200 disabled:opacity-50"
+                                />
+                                <button
+                                  onClick={() => exposeChild(childLabel)}
+                                  disabled={isExposing}
+                                  className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-gray-900 text-white text-[11px] font-medium hover:bg-gray-700 transition-colors disabled:opacity-40"
+                                >
+                                  {isExposing ? (
+                                    <Loader className="w-3 h-3 animate-spin" />
+                                  ) : null}
+                                  <span>Go</span>
+                                </button>
+                                <button
+                                  onClick={() => setExposeForm(null)}
+                                  disabled={isExposing}
+                                  title="Cancel"
+                                  className="w-5 h-5 flex items-center justify-center text-gray-300 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-all duration-200 disabled:opacity-40"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                onClick={() =>
+                                  setExposeForm({ child: childLabel, port: '80' })
+                                }
+                                title="Expose a port of this container on the host"
+                                className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full border border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-300 hover:bg-gray-50 text-[11px] font-medium transition-colors"
+                              >
+                                <Globe className="w-3 h-3" />
+                                <span>Expose</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
 
                         {/* Grandchildren: containers created from this node's terminal */}
                         {childSelected && (
@@ -1783,14 +2114,117 @@ export const Room = () => {
                 </div>
               )}
               </div>
+              </div>
 
-              {/* Events timeline (hidden until the events endpoint responds) */}
-              <EventsSection parentName={parentName} active={parentRunning} />
+              {/* Right/wider column: the terminal is the primary tool here. */}
+              <div className="xl:col-span-2 space-y-6">
+              {/* Terminal / Logs Section */}
+              <div>
+                <div className="flex items-center justify-between mb-3 px-1 flex-wrap gap-2">
+                  <div className="flex items-center space-x-3">
+                    {panelView === 'logs' ? (
+                      <ScrollText className="w-4 h-4 text-gray-500" />
+                    ) : (
+                      <Terminal className="w-4 h-4 text-gray-500" />
+                    )}
+                    {/* Segmented control: Terminal / Logs */}
+                    <div className="flex items-center bg-gray-100 rounded-xl p-0.5">
+                      <button
+                        onClick={() => setPanelView('terminal')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                          panelView === 'terminal'
+                            ? 'bg-white text-gray-900 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                        }`}
+                      >
+                        Terminal
+                      </button>
+                      <button
+                        onClick={() => setPanelView('logs')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                          panelView === 'logs'
+                            ? 'bg-white text-gray-900 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                        }`}
+                      >
+                        Logs
+                      </button>
+                    </div>
+                    {/* Plugin / stack actions live next to the terminal now. */}
+                    <button
+                      onClick={openInstallModal}
+                      className="flex items-center space-x-2 px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl transition-all duration-200 text-xs font-semibold border border-gray-200/70"
+                    >
+                      <Package className="w-4 h-4" />
+                      <span>Install Plugin</span>
+                    </button>
+                    <button
+                      onClick={openDeployModal}
+                      className="flex items-center space-x-2 px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl transition-all duration-200 text-xs font-semibold border border-gray-200/70"
+                    >
+                      <Layers className="w-4 h-4" />
+                      <span>Deploy Stack</span>
+                    </button>
+                  </div>
+                  <div className="flex items-center space-x-3 min-w-0">
+                    {/* Open in editor (code-server inside the parent; local-only) */}
+                    {!roomHost && (
+                      <button
+                        onClick={openEditor}
+                        disabled={editorOpening || !parentId}
+                        title={
+                          editorUrl
+                            ? 'Open the workspace editor'
+                            : 'Prepare and open the workspace editor'
+                        }
+                        className="flex items-center space-x-1.5 px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl transition-all duration-200 text-xs font-semibold border border-gray-200/70 disabled:opacity-50 flex-shrink-0"
+                      >
+                        {editorOpening ? (
+                          <Loader className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Code className="w-3.5 h-3.5" />
+                        )}
+                        <span>{editorOpening ? 'Preparing…' : 'Open in editor'}</span>
+                      </button>
+                    )}
+                    <span className="text-sm text-gray-500 font-mono truncate">
+                      {roomLabel}
+                      {selectedChild ? ` › ${selectedChild.Name || selectedChild.ID}` : ''}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Both views stay mounted; hiding preserves the Cli websocket and
+                    the LogsPanel stream when toggling between them. */}
+                <div className="h-[34rem]">
+                  <div className={panelView === 'logs' ? 'hidden' : 'h-full'}>
+                    <Cli
+                      key={parentId}
+                      containerId={parentId}
+                      innerContainerId={selectedChild?.ID || undefined}
+                      host={room?.host}
+                    />
+                  </div>
+                  <div className={panelView === 'logs' ? 'h-full' : 'hidden'}>
+                    <LogsPanel
+                      containerId={parentId}
+                      innerContainerId={selectedChild?.ID || undefined}
+                      host={room?.host}
+                      label={selectedTargetLabel}
+                    />
+                  </div>
+                </div>
+              </div>
+              </div>
             </div>
 
-            {/* Right column: metrics + terminal */}
-            <div className="xl:col-span-2 space-y-6">
-              {/* Metrics Panel */}
+            {/* --------------------------------------------- Observability --- */}
+            <div
+              className={`space-y-6 ${
+                activeTab === 'observability' ? '' : 'hidden'
+              }`}
+            >
+              {/* Metrics Panel (full-width) */}
               <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-lg border border-white/20 p-6">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center space-x-2">
@@ -1801,20 +2235,6 @@ export const Room = () => {
                     </span>
                   </div>
                   <div className="flex items-center space-x-2">
-                    <button
-                      onClick={openInstallModal}
-                      className="flex items-center space-x-2 px-4 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl transition-all duration-200 text-sm font-medium border border-gray-200/70"
-                    >
-                      <Package className="w-4 h-4" />
-                      <span>Install Plugin</span>
-                    </button>
-                    <button
-                      onClick={openDeployModal}
-                      className="flex items-center space-x-2 px-4 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl transition-all duration-200 text-sm font-medium border border-gray-200/70"
-                    >
-                      <Layers className="w-4 h-4" />
-                      <span>Deploy Stack</span>
-                    </button>
                     <button
                       onClick={() => {
                         loadMetrics(parentId, selectedChild);
@@ -1898,65 +2318,28 @@ export const Room = () => {
                 )}
               </div>
 
-              {/* Terminal / Logs Section */}
-              <div>
-                <div className="flex items-center justify-between mb-3 px-1">
-                  <div className="flex items-center space-x-3">
-                    {panelView === 'logs' ? (
-                      <ScrollText className="w-4 h-4 text-gray-500" />
-                    ) : (
-                      <Terminal className="w-4 h-4 text-gray-500" />
-                    )}
-                    {/* Segmented control: Terminal / Logs */}
-                    <div className="flex items-center bg-gray-100 rounded-xl p-0.5">
-                      <button
-                        onClick={() => setPanelView('terminal')}
-                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all duration-200 ${
-                          panelView === 'terminal'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                      >
-                        Terminal
-                      </button>
-                      <button
-                        onClick={() => setPanelView('logs')}
-                        className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all duration-200 ${
-                          panelView === 'logs'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                      >
-                        Logs
-                      </button>
-                    </div>
-                  </div>
-                  <span className="text-sm text-gray-500 font-mono truncate">
-                    {roomLabel}
-                    {selectedChild ? ` › ${selectedChild.Name || selectedChild.ID}` : ''}
-                  </span>
-                </div>
-
-                <div className="h-[28rem]">
-                  {panelView === 'logs' ? (
-                    <LogsPanel
-                      containerId={parentId}
-                      innerContainerId={selectedChild?.ID || undefined}
-                      host={room?.host}
-                      label={selectedTargetLabel}
-                    />
-                  ) : (
-                    <Cli
-                      key={parentId}
-                      containerId={parentId}
-                      innerContainerId={selectedChild?.ID || undefined}
-                      host={room?.host}
-                    />
-                  )}
-                </div>
-              </div>
+              {/* Events timeline (hidden until the events endpoint responds) */}
+              <EventsSection parentName={parentName} active={parentRunning} />
             </div>
-          </div>
+
+            {/* ------------------------------------------------------- Ops --- */}
+            <div
+              className={`space-y-6 ${activeTab === 'ops' ? '' : 'hidden'}`}
+            >
+              {/* Snapshots, GitHub deploys and Labs (only while running) */}
+              {parentRunning && (
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                  <SnapshotsPanel
+                    parentId={parentId}
+                    parentName={parentName}
+                    onRestored={() => parentId && fetchChildren(parentId)}
+                  />
+                  <GithubDeployCard parentId={parentId} parentName={parentName} />
+                  <LabsPanel parentId={parentId} />
+                </div>
+              )}
+            </div>
+          </>
         )}
       </div>
 

@@ -1,5 +1,6 @@
 import os
 import re
+import socket
 import subprocess
 import json
 import io
@@ -62,6 +63,35 @@ async def get_container_ip(container_id: str, user=Depends(require_user)):
     except Exception as e:
         return {'error': str(e)}
 
+def _run_in_container(container, command):
+    """Run a shell command inside a container without the single-quote clash of
+    an `sh -c '...'` wrapper: the command is base64-encoded and decoded inside,
+    so quotes, pipes and redirects survive intact. Returns (exit_code, output)."""
+    import base64
+    encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
+    wrapper = f"echo {encoded} | base64 -d | sh"
+    exec_id = container.exec_run(["sh", "-c", wrapper], privileged=True)
+    return exec_id.exit_code, exec_id.output.decode("utf-8", errors="replace")
+
+@app.post('/exec')
+async def execute_command_body(body: dict, host: str = None, user=Depends(require_user)):
+    """Preferred exec endpoint: command travels in the JSON body, so slashes and
+    quotes never break routing. Body: {container_id, command, inner?}."""
+    docker_client = get_client(host)
+    container_id = body.get("container_id")
+    command = body.get("command", "")
+    inner = body.get("inner")
+    if not container_id or not command:
+        raise HTTPException(status_code=400, detail="container_id and command are required")
+    try:
+        container = docker_client.containers.get(container_id)
+        if inner:
+            command = f"docker exec {inner} sh -c \"$(echo {__import__('base64').b64encode(command.encode()).decode()} | base64 -d)\""
+        code, output = _run_in_container(container, command)
+        return {'exit_code': code, 'output': output} if code == 0 else {'exit_code': code, 'error': output, 'output': output}
+    except Exception as e:
+        return {'error': str(e)}
+
 @app.post('/exe/{container_id}/{command}')
 async def execute_command(container_id: str, command: str, host: str = None, user=Depends(require_user)):
     docker_client = get_client(host)
@@ -96,27 +126,39 @@ async def execute_nested_command(outer_container_id: str, inner_container_id: st
 NODE_IMAGE = "docker:dind"
 NODE_DAEMON_TIMEOUT_SECONDS = 30
 
+def create_dind_parent(docker_client, name: str):
+    """docker run one privileged docker:dind parent (the containermain
+    shape); the caller decides whether to wait for the inner daemon."""
+    return docker_client.containers.run(
+        NODE_IMAGE,
+        detach=True,
+        name=name,
+        privileged=True,
+        environment={"DOCKER_TLS_CERTDIR": ""},
+        volumes=["/var/lib/docker"],
+    )
+
+def wait_for_inner_daemon(container):
+    """Poll docker info inside a fresh DinD parent until the inner daemon
+    answers; returns the inner server version, or None on timeout."""
+    for _ in range(NODE_DAEMON_TIMEOUT_SECONDS):
+        check = container.exec_run("docker info --format {{.ServerVersion}}")
+        if check.exit_code == 0:
+            return check.output.decode("utf-8").strip()
+        time.sleep(1)
+    return None
+
 @app.post("/containermain/{id}")
 async def create_container_main(id: str, host: str = None, user=Depends(require_user)):
     docker_client = get_client(host)
     containers = {container.name: container for container in docker_client.containers.list(all=True)}
     if id in containers:
         return {"message": f"Container {id} already exists"}
-    container = docker_client.containers.run(
-        NODE_IMAGE,
-        detach=True,
-        name=id,
-        privileged=True,
-        environment={"DOCKER_TLS_CERTDIR": ""},
-        volumes=["/var/lib/docker"],
-    )
+    container = create_dind_parent(docker_client, id)
     record_event(id, "workspace_provisioned", f"workspace {id} provisioned", user.get("user_id"))
-    for _ in range(NODE_DAEMON_TIMEOUT_SECONDS):
-        check = container.exec_run("docker info --format {{.ServerVersion}}")
-        if check.exit_code == 0:
-            inner_version = check.output.decode("utf-8").strip()
-            return {"message": f"Node {id} ready (inner Docker {inner_version})"}
-        time.sleep(1)
+    inner_version = wait_for_inner_daemon(container)
+    if inner_version is not None:
+        return {"message": f"Node {id} ready (inner Docker {inner_version})"}
     return {"message": f"Node {id} created; inner Docker daemon is still starting"}
 
 @app.get("/containers/{container_id}/ps")
@@ -378,11 +420,26 @@ def parse_stack_services(files):
         })
     return validated
 
+def informative_docker_line(output):
+    """Docker's last error line is often the useless '--help' hint; prefer the
+    line that actually says what went wrong."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    for line in reversed(lines):
+        if "--help" in line:
+            continue
+        if "error" in line.lower() or "conflict" in line.lower():
+            return line
+    return next((l for l in reversed(lines) if "--help" not in l), lines[-1])
+
 def run_stack_container(parent, service, index):
     """docker run one replica (<service>-<index>) inside the parent; returns
-    (ok, last_line) and never raises. Restart policy is deliberately NOT
-    passed to docker — the reconciler owns it."""
-    command = f"docker run -dit --privileged --name {service['name']}-{index}"
+    (ok, informative_line) and never raises. Restart policy is deliberately NOT
+    passed to docker — the reconciler owns it. Idempotent: an existing
+    container with the same name is replaced (docker compose up semantics)."""
+    name = f"{service['name']}-{index}"
+    command = f"docker rm -f {name} >/dev/null 2>&1; docker run -dit --privileged --name {name}"
     if service.get("memory"):
         command += f" --memory {service['memory']}"
     if service.get("cpus"):
@@ -393,9 +450,9 @@ def run_stack_container(parent, service, index):
     try:
         exec_result = parent.exec_run(f"sh -c '{command}'", privileged=True)
         output = exec_result.output.decode("utf-8", errors="replace").strip()
-        last_line = output.splitlines()[-1].strip() if output else ""
-        ok = exec_result.exit_code == 0 and "error" not in last_line.lower()
-        return ok, last_line
+        line = informative_docker_line(output)
+        ok = exec_result.exit_code == 0 and "error" not in line.lower()
+        return ok, line
     except Exception as e:
         return False, str(e)
 
@@ -1355,14 +1412,21 @@ def parent_stats(parent):
             cpu_by_name[name] = parse_percent(percent)
     return cpu_by_name
 
+IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
 def child_ip(parent, child_name):
     """A child's IP on the parent's default bridge (names don't resolve
-    there, so probes must target the IP)."""
+    there, so probes must target the IP). Returns None when the child is
+    missing or has no IP yet — docker inspect errors must never be
+    mistaken for an address."""
     exec_result = parent.exec_run(
         "sh -c 'docker inspect --format \"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\" " + child_name + "'",
         privileged=True,
     )
-    return exec_result.output.decode("utf-8", errors="replace").strip()
+    value = exec_result.output.decode("utf-8", errors="replace").strip()
+    if exec_result.exit_code != 0 or not IPV4_RE.match(value):
+        return None
+    return value
 
 def run_probe(parent, child_name, probe):
     """Execute one probe against a child from inside the parent; True when
@@ -1479,6 +1543,10 @@ def reconcile_deployment(doc):
 def reconciler_loop():
     while True:
         try:
+            reap_expired_previews()
+        except Exception:
+            pass
+        try:
             docs = list(deployments.find())
         except Exception:
             docs = []
@@ -1544,6 +1612,717 @@ async def get_deployment(parent: str, user=Depends(require_user)):
         "updated_at": doc.get("updated_at"),
         "services": services,
     }
+
+# ---------------------------------------------------------------------------
+# Exposures (publish a nested child on the host via chained socat proxies)
+# ---------------------------------------------------------------------------
+
+exposures = ci_db['exposures']
+
+EXPOSE_IMAGE = "alpine/socat"
+EXPOSE_PORT_MIN = 42000
+EXPOSE_PORT_MAX = 42999
+EXPOSE_NAME_PREFIX = "lattice-expose-"
+
+def require_local_host(host: str = None):
+    """Expose/editor/snapshot features only drive the local daemon; a remote
+    `host` query param is rejected up front."""
+    if host not in (None, "", "local"):
+        raise HTTPException(status_code=400, detail="Expose/editor/snapshots are local-only for now")
+
+def expose_inner_name(child: str, port: int) -> str:
+    """The socat sidecar inside the parent (parent interfaces -> child)."""
+    return f"{EXPOSE_NAME_PREFIX}{child}-{port}"
+
+def expose_host_name(parent_id: str, host_port: int) -> str:
+    """The socat container on the host (localhost -> parent interfaces)."""
+    return f"{EXPOSE_NAME_PREFIX}{parent_id[:12]}-{host_port}"
+
+def pick_expose_port() -> int:
+    """A free port in the expose range: not claimed by a recorded exposure and
+    actually bindable on the host right now."""
+    taken = {doc.get("host_port") for doc in exposures.find({}, {"host_port": 1})}
+    for port in range(EXPOSE_PORT_MIN, EXPOSE_PORT_MAX + 1):
+        if port in taken:
+            continue
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(("0.0.0.0", port))
+            return port
+        except OSError:
+            continue
+    raise HTTPException(status_code=503, detail=f"No free expose port left in {EXPOSE_PORT_MIN}-{EXPOSE_PORT_MAX}")
+
+def parent_bridge_ip(parent) -> str:
+    """The parent's IP on the host daemon's bridge — where the host socat
+    forwards to."""
+    parent.reload()
+    settings = parent.attrs['NetworkSettings']
+    ip = settings.get('IPAddress')
+    if not ip:
+        for network in (settings.get('Networks') or {}).values():
+            if network.get('IPAddress'):
+                ip = network['IPAddress']
+                break
+    if not ip:
+        raise HTTPException(status_code=500, detail=f"Parent {parent.name} has no bridge IP")
+    return ip
+
+def serialize_exposure(doc):
+    return {
+        "id": str(doc["_id"]),
+        "child": doc["child"],
+        "port": doc["port"],
+        "hostPort": doc["host_port"],
+        "url": f"http://localhost:{doc['host_port']}",
+    }
+
+def ensure_exposure(parent, child: str, port: int, actor=None):
+    """Idempotently publish child:port two layers up: a socat inside the
+    parent bridges the child to the parent's interfaces, and a socat on the
+    host bridges the parent to localhost (same port number on both hops).
+    Returns the exposure doc — the existing one when child+port is already
+    exposed."""
+    existing = exposures.find_one({"parent_id": parent.id, "child": child, "port": port})
+    if existing:
+        return existing
+    ip = child_ip(parent, child)
+    if not ip:
+        raise HTTPException(status_code=400, detail=f"Child {child} has no IP inside {parent.name} (is it running?)")
+    bridge_port = pick_expose_port()
+    inner = parent.exec_run(
+        f"sh -c 'docker run -d --name {expose_inner_name(child, port)} "
+        f"-p {bridge_port}:{bridge_port} {EXPOSE_IMAGE} "
+        f"tcp-listen:{bridge_port},fork,reuseaddr tcp:{ip}:{port}'",
+        privileged=True,
+    )
+    if inner.exit_code != 0:
+        raise HTTPException(status_code=500, detail={
+            'error': 'Failed to start expose proxy inside parent',
+            'message': inner.output.decode("utf-8", errors="replace"),
+        })
+    try:
+        client.containers.run(
+            EXPOSE_IMAGE,
+            f"tcp-listen:{bridge_port},fork,reuseaddr tcp:{parent_bridge_ip(parent)}:{bridge_port}",
+            detach=True,
+            name=expose_host_name(parent.id, bridge_port),
+            ports={f"{bridge_port}/tcp": bridge_port},
+            labels={"lattice-expose": "1"},
+        )
+    except Exception as e:
+        parent.exec_run(f"sh -c 'docker rm -f {expose_inner_name(child, port)}'", privileged=True)
+        raise HTTPException(status_code=500, detail={'error': 'Failed to start expose proxy on host', 'message': str(e)})
+    doc = {
+        "parent_id": parent.id,
+        "parent_name": parent.name,
+        "child": child,
+        "port": port,
+        "host_port": bridge_port,
+        "created_at": utc_now_iso(),
+    }
+    doc["_id"] = exposures.insert_one(doc).inserted_id
+    record_event(parent.name, "exposed",
+                 f"{child}:{port} exposed at http://localhost:{bridge_port}", actor)
+    return doc
+
+def teardown_exposure(doc):
+    """Best-effort removal of both socat proxies; already-gone containers (or
+    a gone parent) don't error."""
+    try:
+        client.containers.get(expose_host_name(doc["parent_id"], doc["host_port"])).remove(force=True)
+    except Exception:
+        pass
+    try:
+        parent = client.containers.get(doc["parent_id"])
+        parent.exec_run(
+            f"sh -c 'docker rm -f {expose_inner_name(doc['child'], doc['port'])}'",
+            privileged=True,
+        )
+    except Exception:
+        pass
+
+@app.post("/container/{parent_id}/expose/{child}")
+async def expose_child(parent_id: str, child: str, body: dict, host: str = None, user=Depends(require_user)):
+    require_local_host(host)
+    port = body.get("port") if isinstance(body, dict) else None
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise HTTPException(status_code=400, detail="body needs an integer port (1-65535)")
+    try:
+        parent = client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    try:
+        return serialize_exposure(ensure_exposure(parent, child, port, user.get("user_id")))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to expose child', 'message': str(e)})
+
+@app.get("/exposures")
+async def list_exposures(parent: str = None, user=Depends(require_user)):
+    query = {"$or": [{"parent_name": parent}, {"parent_id": parent}]} if parent else {}
+    return [serialize_exposure(doc) for doc in exposures.find(query).sort("created_at", -1)]
+
+@app.delete("/exposures/{exposure_id}")
+async def delete_exposure(exposure_id: str, user=Depends(require_user)):
+    try:
+        object_id = ObjectId(exposure_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid exposure id")
+    doc = exposures.find_one_and_delete({"_id": object_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Exposure not found")
+    teardown_exposure(doc)
+    record_event(doc.get("parent_name"), "unexposed",
+                 f"{doc.get('child')}:{doc.get('port')} unexposed from host port {doc.get('host_port')}",
+                 user.get("user_id"))
+    return {"deleted": exposure_id}
+
+# ---------------------------------------------------------------------------
+# Editor (one-click code-server child inside a workspace parent)
+# ---------------------------------------------------------------------------
+
+EDITOR_CHILD_NAME = "editor"
+EDITOR_IMAGE = "codercom/code-server:latest"
+EDITOR_PORT = 8080
+
+def ensure_editor_child(parent):
+    """Idempotently run (or restart) the code-server child inside the parent.
+    The first use pulls the image inside the parent (~350 MB), so this exec
+    can take minutes — exec_run blocks without a timeout, which is what we
+    want here."""
+    status = parent_ps(parent).get(EDITOR_CHILD_NAME)
+    if status is None:
+        exec_result = parent.exec_run(
+            f"sh -c 'docker run -d --name {EDITOR_CHILD_NAME} "
+            f"-v /opt/lattice:/home/coder/project {EDITOR_IMAGE} "
+            f"--auth none --bind-addr 0.0.0.0:{EDITOR_PORT}'",
+            privileged=True,
+        )
+        if exec_result.exit_code != 0:
+            raise HTTPException(status_code=500, detail={
+                'error': 'Failed to start editor',
+                'message': exec_result.output.decode("utf-8", errors="replace"),
+            })
+    elif not status.startswith("Up"):
+        parent.exec_run(f"sh -c 'docker start {EDITOR_CHILD_NAME}'", privileged=True)
+
+@app.post("/container/{parent_id}/editor")
+async def open_editor(parent_id: str, host: str = None, user=Depends(require_user)):
+    require_local_host(host)
+    try:
+        parent = client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    try:
+        ensure_editor_child(parent)
+        exposure = ensure_exposure(parent, EDITOR_CHILD_NAME, EDITOR_PORT, user.get("user_id"))
+        url = f"http://localhost:{exposure['host_port']}"
+        record_event(parent.name, "editor_opened", f"editor ready at {url}", user.get("user_id"))
+        return {"url": url, "status": "ready"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to open editor', 'message': str(e)})
+
+@app.get("/container/{parent_id}/editor")
+async def get_editor(parent_id: str, host: str = None, user=Depends(require_user)):
+    require_local_host(host)
+    try:
+        parent = client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    try:
+        exists = EDITOR_CHILD_NAME in parent_ps(parent)
+        exposure = exposures.find_one(
+            {"parent_id": parent.id, "child": EDITOR_CHILD_NAME, "port": EDITOR_PORT})
+        url = f"http://localhost:{exposure['host_port']}" if exposure else None
+        return {"exists": exists, "url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to inspect editor', 'message': str(e)})
+
+# ---------------------------------------------------------------------------
+# Snapshots (docker-commit the children of a workspace; restore later)
+# ---------------------------------------------------------------------------
+
+snapshots = ci_db['snapshots']
+
+SNAPSHOT_NAME_SANITIZE_RE = re.compile(r"[^a-z0-9-]")
+
+def is_snapshot_exempt(child_name: str) -> bool:
+    """Expose sidecars and the editor are infrastructure, not workload: they
+    are neither committed by a snapshot nor removed by a restore."""
+    return child_name == EDITOR_CHILD_NAME or child_name.startswith(EXPOSE_NAME_PREFIX)
+
+def snapshot_candidates(parent):
+    """Running children of the parent eligible for a snapshot ->
+    [{name, image}]."""
+    exec_result = parent.exec_run(
+        "sh -c 'docker ps --format \"{{.Names}},{{.Image}}\"'", privileged=True,
+    )
+    children = []
+    for line in exec_result.output.decode("utf-8", errors="replace").splitlines():
+        if "," not in line:
+            continue
+        name, image = line.split(",", 1)
+        if not is_snapshot_exempt(name):
+            children.append({"name": name, "image": image})
+    return children
+
+def serialize_snapshot(doc):
+    return {
+        "id": str(doc["_id"]),
+        "parent_id": doc.get("parent_id"),
+        "parent_name": doc.get("parent_name"),
+        "name": doc.get("name"),
+        "created_at": doc.get("created_at"),
+        "created_by": doc.get("created_by"),
+        "children": doc.get("children", []),
+    }
+
+def find_snapshot_or_404(snapshot_id: str):
+    try:
+        doc = snapshots.find_one({"_id": ObjectId(snapshot_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid snapshot id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return doc
+
+@app.post("/container/{parent_id}/snapshots")
+async def create_snapshot(parent_id: str, body: dict, host: str = None, user=Depends(require_user)):
+    require_local_host(host)
+    name = SNAPSHOT_NAME_SANITIZE_RE.sub("", str(body.get("name") or "").lower())
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required ([a-z0-9-])")
+    try:
+        parent = client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    if snapshots.find_one({"parent_id": parent.id, "name": name}):
+        raise HTTPException(status_code=409, detail=f"Snapshot {name} already exists for this workspace")
+    try:
+        candidates = snapshot_candidates(parent)
+        if not candidates:
+            raise HTTPException(status_code=400, detail="Workspace has no running children to snapshot")
+        children = []
+        for child in candidates:
+            snap_image = f"lattice-snap-{name}-{child['name']}".lower()
+            commit = parent.exec_run(
+                f"sh -c 'docker commit {child['name']} {snap_image}'", privileged=True,
+            )
+            if commit.exit_code != 0:
+                raise HTTPException(status_code=500, detail={
+                    'error': f"Failed to commit {child['name']}",
+                    'message': commit.output.decode("utf-8", errors="replace"),
+                })
+            children.append({"name": child["name"], "snap_image": snap_image,
+                             "original_image": child["image"]})
+        doc = {
+            "parent_id": parent.id,
+            "parent_name": parent.name,
+            "name": name,
+            "created_at": utc_now_iso(),
+            "created_by": user.get("user_id"),
+            "children": children,
+        }
+        doc["_id"] = snapshots.insert_one(doc).inserted_id
+        record_event(parent.name, "snapshot_created",
+                     f"snapshot {name} captured {len(children)} children", user.get("user_id"))
+        return serialize_snapshot(doc)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to create snapshot', 'message': str(e)})
+
+@app.get("/snapshots")
+async def list_snapshots(parent: str = None, user=Depends(require_user)):
+    query = {"$or": [{"parent_name": parent}, {"parent_id": parent}]} if parent else {}
+    return [serialize_snapshot(doc) for doc in snapshots.find(query).sort("created_at", -1)]
+
+@app.post("/snapshots/{snapshot_id}/restore")
+async def restore_snapshot(snapshot_id: str, host: str = None, user=Depends(require_user)):
+    require_local_host(host)
+    doc = find_snapshot_or_404(snapshot_id)
+    try:
+        parent = client.containers.get(doc["parent_id"])
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"Workspace {doc.get('parent_name')} not found")
+    try:
+        for child in parent_ps(parent):
+            if not is_snapshot_exempt(child):
+                parent.exec_run(f"sh -c 'docker rm -f {child}'", privileged=True)
+        restored = []
+        for child in doc.get("children", []):
+            exec_result = parent.exec_run(
+                f"sh -c 'docker run -dit --name {child['name']} {child['snap_image']}'",
+                privileged=True,
+            )
+            output = exec_result.output.decode("utf-8", errors="replace").strip()
+            last_line = output.splitlines()[-1].strip() if output else ""
+            restored.append({"name": child["name"],
+                             "ok": exec_result.exit_code == 0,
+                             "output": last_line})
+        started = sum(1 for r in restored if r["ok"])
+        record_event(doc["parent_name"], "snapshot_restored",
+                     f"snapshot {doc['name']} restored {started}/{len(restored)} children",
+                     user.get("user_id"))
+        return {"restored": restored}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to restore snapshot', 'message': str(e)})
+
+@app.delete("/snapshots/{snapshot_id}")
+async def delete_snapshot(snapshot_id: str, user=Depends(require_user)):
+    doc = find_snapshot_or_404(snapshot_id)
+    snapshots.delete_one({"_id": doc["_id"]})
+    try:
+        parent = client.containers.get(doc["parent_id"])
+        for child in doc.get("children", []):
+            parent.exec_run(f"sh -c 'docker rmi {child['snap_image']}'", privileged=True)
+    except Exception:
+        pass
+    return {"deleted": snapshot_id}
+
+# ---------------------------------------------------------------------------
+# Preview environments (ephemeral per-changeset workspaces, Vercel-style)
+# ---------------------------------------------------------------------------
+
+PREVIEW_NAME_PREFIX = "lat-prev-"
+PREVIEW_TTL_MINUTES = 60
+PREVIEW_JANITOR_INTERVAL_SECONDS = 60
+PREVIEW_CREATED_FRACTION_RE = re.compile(r"(\.\d{6})\d+")  # ns -> µs for fromisoformat
+
+_preview_last_sweep = 0.0  # monotonic-ish gate; only the reconciler thread writes it
+
+def fetch_changeset_or_404(package_id: str, changeset_id: str, authorization: str = None):
+    headers = {"Authorization": authorization} if authorization else {}
+    response = requests.get(
+        f"{PACKAGES_SERVICE_URL}/packages/{package_id}/changesets/{changeset_id}",
+        headers=headers, timeout=15,
+    )
+    if response.status_code != 200:
+        raise HTTPException(status_code=404, detail="Changeset not found")
+    return response.json()
+
+def overlay_changeset_files(package_files: list, changeset_files: list) -> list:
+    """Effective preview content: the package's files overlaid with the
+    changeset's files — the changeset wins by name."""
+    by_name = {f["name"]: f for f in package_files}
+    for file in changeset_files:
+        if file.get("name") and file.get("content") is not None:
+            by_name[file["name"]] = file
+    return list(by_name.values())
+
+def preview_parent_name(changeset_id: str) -> str:
+    suffix = STACK_NAME_SANITIZE_RE.sub("", changeset_id[-8:].lower())
+    if not suffix:
+        raise HTTPException(status_code=400, detail="Invalid changeset id")
+    return f"{PREVIEW_NAME_PREFIX}{suffix}"
+
+def ensure_preview_parent(name: str):
+    """Idempotently create the ephemeral DinD parent for a preview on the
+    local daemon; reused as-is when it already exists."""
+    try:
+        return client.containers.get(name)
+    except docker.errors.NotFound:
+        pass
+    parent = create_dind_parent(client, name)
+    wait_for_inner_daemon(parent)
+    return parent
+
+def parse_container_created(raw: str):
+    """Docker reports Created with nanosecond precision; trim to µs so
+    fromisoformat accepts it. Returns an aware datetime or None."""
+    try:
+        trimmed = PREVIEW_CREATED_FRACTION_RE.sub(r"\1", raw).replace("Z", "+00:00")
+        return datetime.datetime.fromisoformat(trimmed)
+    except (TypeError, ValueError):
+        return None
+
+def cleanup_preview_exposures(parent_name: str, parent_id: str = None):
+    """Best-effort removal of exposure docs (and their host-side socat) left
+    behind by a preview parent."""
+    query = {"parent_name": parent_name}
+    if parent_id:
+        query = {"$or": [{"parent_name": parent_name}, {"parent_id": parent_id}]}
+    for doc in exposures.find(query):
+        teardown_exposure(doc)
+        exposures.delete_one({"_id": doc["_id"]})
+
+def reap_expired_previews():
+    """Janitor (runs inside the reconciler loop, at most once per minute):
+    remove lat-prev-* parents older than PREVIEW_TTL_MINUTES. Previews are
+    local-only, so only the local daemon is swept."""
+    global _preview_last_sweep
+    now = time.time()
+    if now - _preview_last_sweep < PREVIEW_JANITOR_INTERVAL_SECONDS:
+        return
+    _preview_last_sweep = now
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=PREVIEW_TTL_MINUTES)
+    for container in client.containers.list(all=True):
+        if not container.name.startswith(PREVIEW_NAME_PREFIX):
+            continue
+        created = parse_container_created(container.attrs.get("Created", ""))
+        if created is None or created >= cutoff:
+            continue
+        try:
+            container.remove(force=True)
+            cleanup_preview_exposures(container.name, container.id)
+            record_event(container.name, "preview_expired",
+                         f"preview {container.name} expired after {PREVIEW_TTL_MINUTES} minutes")
+        except Exception:
+            pass
+
+@app.post("/preview/{package_id}/changesets/{changeset_id}")
+async def create_preview(package_id: str, changeset_id: str, user=Depends(require_user), authorization: str = Header(None)):
+    package, package_files = fetch_package_or_404(package_id, authorization)
+    changeset = fetch_changeset_or_404(package_id, changeset_id, authorization)
+    files = overlay_changeset_files(package_files, changeset.get("files") or [])
+    parent_name = preview_parent_name(changeset_id)
+    actor = user.get("user_id")
+    try:
+        parent = ensure_preview_parent(parent_name)
+        ensure_reconciler_started()  # the reconciler loop hosts the janitor
+        if any(f["name"] == "stack.json" for f in files):
+            # Previews are deliberately NOT upserted into deployments: the
+            # reconciler must not resurrect what the janitor is about to reap.
+            services = parse_stack_services(files)
+            deployed = []
+            for service in services:
+                deployed.extend(deploy_stack_service(parent, service))
+            record_event(parent_name, "preview_created",
+                         f"preview of {package_id}@{changeset_id} deployed {len(services)} services", actor)
+            return {"parent": parent_name, "kind": "stack", "deployed": deployed,
+                    "expires_in_minutes": PREVIEW_TTL_MINUTES}
+        package_name = package.get("name", package_id)
+        parent.exec_run(f"sh -c 'mkdir -p {PLUGINS_DIR}'", privileged=True)
+        parent.put_archive(PLUGINS_DIR, build_package_tar(package_name, files))
+        run_install_script(parent, package_name, files)
+        record_event(parent_name, "preview_created",
+                     f"preview of {package_id}@{changeset_id} installed plugin {package_name}", actor)
+        return {"parent": parent_name, "kind": "plugin", "installed": package_name,
+                "expires_in_minutes": PREVIEW_TTL_MINUTES}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to create preview', 'message': str(e)})
+
+@app.get("/previews")
+async def list_previews(user=Depends(require_user)):
+    ensure_reconciler_started()
+    try:
+        output = subprocess.check_output(["docker", "ps", "-a", "--format", "{{json .}}"])
+        previews = []
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            info = json.loads(line)
+            if info.get("Names", "").startswith(PREVIEW_NAME_PREFIX):
+                previews.append({
+                    "name": info.get("Names", ""),
+                    "status": info.get("Status", ""),
+                    "created": info.get("RunningFor", ""),
+                })
+        return previews
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to list previews', 'message': str(e)})
+
+@app.delete("/previews/{name}")
+async def delete_preview(name: str, user=Depends(require_user)):
+    if not name.startswith(PREVIEW_NAME_PREFIX):
+        raise HTTPException(status_code=400, detail=f"Not a preview container (expected {PREVIEW_NAME_PREFIX}*)")
+    try:
+        preview = client.containers.get(name)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Preview not found")
+    try:
+        parent_id = preview.id
+        preview.remove(force=True)
+        cleanup_preview_exposures(name, parent_id)
+        return {"deleted": name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={'error': 'Failed to delete preview', 'message': str(e)})
+
+# ---------------------------------------------------------------------------
+# GitHub watches (mini-Heroku: poll a branch, build + redeploy on new commits)
+# ---------------------------------------------------------------------------
+
+watches = ci_db['watches']
+
+GITHUB_REPO_RE = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+/?$")
+GITHUB_BRANCH_RE = re.compile(r"^[\w./-]+$")
+GITHUB_API_TIMEOUT_SECONDS = 10
+WATCH_POLL_INTERVAL_SECONDS = 120
+# Unauthenticated GitHub API allows 60 requests/hour; with a 120s pass and the
+# 180s per-watch floor below this comfortably supports ~2 watches.
+WATCH_MIN_CHECK_INTERVAL_SECONDS = 180
+WATCH_ERROR_MAX_CHARS = 500
+
+_watch_poller_lock = threading.Lock()
+_watch_poller_started = False
+
+def serialize_watch(doc):
+    doc = dict(doc)
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+def find_watch_or_404(watch_id: str):
+    try:
+        doc = watches.find_one({"_id": ObjectId(watch_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid watch id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Watch not found")
+    return doc
+
+def github_latest_sha(repo: str, branch: str) -> str:
+    owner_repo = repo.rstrip("/").removeprefix("https://github.com/")
+    response = requests.get(
+        f"https://api.github.com/repos/{owner_repo}/commits/{branch}",
+        headers={"User-Agent": "lattice", "Accept": "application/vnd.github+json"},
+        timeout=GITHUB_API_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()["sha"]
+
+def run_watch_build(parent, watch, sha: str):
+    """Build the repo inside the parent (BuildKit in dind clones git contexts
+    itself) and swap the running service container on success. The build exec
+    deliberately has no timeout. Returns (ok, detail)."""
+    service = watch["service"]
+    tag = f"watch-{service}:{sha[:7]}"
+    build_command = f"docker build -t {tag} {watch['repo'].rstrip('/')}.git#{watch['branch']}"
+    build = parent.exec_run(f"sh -c '{build_command}'", privileged=True)
+    output = build.output.decode("utf-8", errors="replace")
+    if build.exit_code != 0:
+        return False, output[-WATCH_ERROR_MAX_CHARS:]
+    parent.exec_run(f"sh -c 'docker rm -f {service}'", privileged=True)
+    run = parent.exec_run(f"sh -c 'docker run -dit --name {service} {tag}'", privileged=True)
+    if run.exit_code != 0:
+        return False, run.output.decode("utf-8", errors="replace")[-WATCH_ERROR_MAX_CHARS:]
+    return True, tag
+
+def update_watch(doc, fields: dict):
+    fields = {**fields, "last_checked": utc_now_iso()}
+    watches.update_one({"_id": doc["_id"]}, {"$set": fields})
+    return watches.find_one({"_id": doc["_id"]})
+
+def poll_watch(doc, actor=None):
+    """One poll cycle for one watch: compare the branch head against last_sha
+    and build + redeploy inside the parent when it moved. Never raises;
+    returns the refreshed doc."""
+    try:
+        sha = github_latest_sha(doc["repo"], doc["branch"])
+    except Exception as e:
+        return update_watch(doc, {"last_status": "error",
+                                  "last_error": str(e)[:WATCH_ERROR_MAX_CHARS]})
+    if sha == doc.get("last_sha"):
+        return update_watch(doc, {})
+    try:
+        parent = client.containers.get(doc["parent_name"])
+        doc = update_watch(doc, {"last_status": "building"})
+        record_event(doc["parent_name"], "github_build",
+                     f"building {doc['service']} from {doc['repo']}@{sha[:7]}", actor)
+        ok, detail = run_watch_build(parent, doc, sha)
+        if ok:
+            record_event(doc["parent_name"], "github_deploy",
+                         f"deployed {doc['service']} at {sha[:7]}", actor)
+            return update_watch(doc, {"last_status": "ok", "last_sha": sha, "last_error": None})
+        record_event(doc["parent_name"], "github_build_failed",
+                     f"build of {doc['service']} at {sha[:7]} failed", actor)
+        return update_watch(doc, {"last_status": "error", "last_error": detail})
+    except Exception as e:
+        return update_watch(doc, {"last_status": "error",
+                                  "last_error": str(e)[:WATCH_ERROR_MAX_CHARS]})
+
+def watch_poller_loop():
+    while True:
+        try:
+            docs = list(watches.find())
+        except Exception:
+            docs = []
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for doc in docs:
+            try:
+                last_checked = doc.get("last_checked")
+                if last_checked:
+                    age = (now - datetime.datetime.fromisoformat(last_checked)).total_seconds()
+                    if age < WATCH_MIN_CHECK_INTERVAL_SECONDS:
+                        continue
+                poll_watch(doc)
+            except Exception:
+                pass
+        time.sleep(WATCH_POLL_INTERVAL_SECONDS)
+
+def ensure_watch_poller_started():
+    """Lazily start the single watch poller daemon thread. Safe to call on
+    every write/read."""
+    global _watch_poller_started
+    with _watch_poller_lock:
+        if _watch_poller_started:
+            return
+        threading.Thread(
+            target=watch_poller_loop, name="lattice-watch-poller", daemon=True,
+        ).start()
+        _watch_poller_started = True
+
+@app.post("/watches")
+async def create_watch(body: dict, user=Depends(require_user)):
+    repo = str(body.get("repo") or "").strip()
+    branch = str(body.get("branch") or "main").strip() or "main"
+    service = STACK_NAME_SANITIZE_RE.sub("", str(body.get("service") or "").lower())
+    parent_name = str(body.get("parent") or "").strip()
+    if not GITHUB_REPO_RE.match(repo):
+        raise HTTPException(status_code=400, detail="repo must look like https://github.com/user/repo")
+    if not GITHUB_BRANCH_RE.match(branch):
+        raise HTTPException(status_code=400, detail="branch may only contain [\\w./-]")
+    if not service:
+        raise HTTPException(status_code=400, detail="service is required ([a-z0-9-])")
+    if not parent_name:
+        raise HTTPException(status_code=400, detail="parent is required")
+    try:
+        parent = client.containers.get(parent_name)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    doc = {
+        "repo": repo,
+        "branch": branch,
+        "service": service,
+        "parent_name": parent.name,
+        "last_sha": None,
+        "last_status": "idle",
+        "last_error": None,
+        "last_checked": None,
+        "created_by": user.get("user_id"),
+        "created_at": utc_now_iso(),
+    }
+    doc["_id"] = watches.insert_one(doc).inserted_id
+    record_event(parent.name, "watch_created",
+                 f"watching {repo}@{branch} -> {service}", user.get("user_id"))
+    ensure_watch_poller_started()
+    return serialize_watch(doc)
+
+@app.get("/watches")
+async def list_watches(parent: str = None, user=Depends(require_user)):
+    ensure_watch_poller_started()
+    query = {"parent_name": parent} if parent else {}
+    return [serialize_watch(doc) for doc in watches.find(query).sort("created_at", -1)]
+
+@app.delete("/watches/{watch_id}")
+async def delete_watch(watch_id: str, user=Depends(require_user)):
+    doc = find_watch_or_404(watch_id)
+    watches.delete_one({"_id": doc["_id"]})
+    return {"deleted": watch_id}
+
+@app.post("/watches/{watch_id}/check")
+async def check_watch(watch_id: str, user=Depends(require_user)):
+    doc = find_watch_or_404(watch_id)
+    ensure_watch_poller_started()
+    return serialize_watch(poll_watch(doc, actor=user.get("user_id")))
 
 @app.post("/container/{container_id}/start")
 async def start_container(container_id: str, host: str = None, user=Depends(require_user)):
