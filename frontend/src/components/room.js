@@ -54,6 +54,11 @@ import {
 import { SnapshotsPanel } from './SnapshotsPanel';
 import { LabsPanel } from './LabsPanel';
 import { GithubDeployCard } from './GithubDeployCard';
+import { SecretsPanel } from './SecretsPanel';
+import { VolumesPanel } from './VolumesPanel';
+import { CronPanel } from './CronPanel';
+import { FilesPanel } from './FilesPanel';
+import { ExportButton } from './ExportButton';
 
 ChartJS.register(
   CategoryScale,
@@ -2326,17 +2331,36 @@ export const Room = () => {
             <div
               className={`space-y-6 ${activeTab === 'ops' ? '' : 'hidden'}`}
             >
-              {/* Snapshots, GitHub deploys and Labs (only while running) */}
+              {/* All Ops panels require a running parent (same gate as before). */}
               {parentRunning && (
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                  <SnapshotsPanel
-                    parentId={parentId}
-                    parentName={parentName}
-                    onRestored={() => parentId && fetchChildren(parentId)}
-                  />
-                  <GithubDeployCard parentId={parentId} parentName={parentName} />
-                  <LabsPanel parentId={parentId} />
-                </div>
+                <>
+                  {/* Header row: workspace tools label + export on the right. */}
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div className="flex items-center space-x-2 min-w-0">
+                      <Wrench className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                      <span className="text-sm font-semibold text-gray-700">
+                        Workspace tools
+                      </span>
+                    </div>
+                    <ExportButton parentId={parentId} parentName={parentName} />
+                  </div>
+
+                  {/* Responsive 2-col grid: Secrets, Volumes, Cron, Files, then
+                      the existing Snapshots, GitHub deploys and Labs. */}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                    <SecretsPanel parentId={parentId} />
+                    <VolumesPanel parentId={parentId} />
+                    <CronPanel parentId={parentId} />
+                    <FilesPanel parentId={parentId} children={children} />
+                    <SnapshotsPanel
+                      parentId={parentId}
+                      parentName={parentName}
+                      onRestored={() => parentId && fetchChildren(parentId)}
+                    />
+                    <GithubDeployCard parentId={parentId} parentName={parentName} />
+                    <LabsPanel parentId={parentId} />
+                  </div>
+                </>
               )}
             </div>
           </>
