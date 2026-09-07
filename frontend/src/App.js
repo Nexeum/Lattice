@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import axios from "axios";
-import { BrowserRouter as Router, Switch, Route, Redirect } from "react-router-dom";
+import { BrowserRouter as Router, Switch, Route, Redirect, useLocation } from "react-router-dom";
 import { Container, Eye, EyeOff, ArrowRight, AlertCircle } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -19,6 +19,7 @@ import { Toasts } from "./components/Toasts";
 import ApiDocumentation from './components/Api';
 import { Admin } from "./components/Admin";
 import { CommandPalette } from "./components/CommandPalette";
+import { TarsChat } from "./components/TarsChat";
 import { startTokenRefresh } from "./lib/api";
 import { initTheme } from "./lib/theme";
 
@@ -229,12 +230,52 @@ function App() {
       <Router>
         <Toasts />
         {authenticated ? (
-          <div className="flex flex-col">
-            <NavbarRC />
-            <CommandPalette />
-            <div className="flex flex-1">
-              {/* Main Content - Responsive */}
-              <main className="flex-1 min-w-0 lg:pr-80">
+          <AuthenticatedLayout authenticated={authenticated} />
+        ) : (
+          <Switch>
+            <Route exact path="/">
+              <Home />
+            </Route>
+            <Route exact path="/api-docs">
+              <div className="min-h-screen bg-white">
+                <PublicNavbar />
+                <div className="pt-16">
+                  <ApiDocumentation />
+                </div>
+              </div>
+            </Route>
+            <Route exact path="/register">
+              <Register />
+            </Route>
+            <Route exact path="/auth">
+              <Auth onAuthenticate={setAuthenticated} />
+            </Route>
+          </Switch>
+        )}
+      </Router>
+    </div>
+  );
+}
+
+// Authenticated shell — separated so it can call useLocation (App renders the
+// Router, so the hook must live in a child) to decide when the contextual
+// right sidebar is shown.
+function AuthenticatedLayout({ authenticated }) {
+  const location = useLocation();
+  const sidebarActive =
+    location.pathname.startsWith("/room/") ||
+    location.pathname.startsWith("/package/");
+
+  return (
+    <div className="flex flex-col">
+      <NavbarRC />
+      <CommandPalette />
+      <TarsChat />
+      <div className="flex flex-1">
+        {/* Main Content - Responsive. The right sidebar only shows
+            contextual cards on plugin/workspace pages, so only those
+            reserve space for it (avoids an empty gutter elsewhere). */}
+        <main className={`flex-1 min-w-0 ${sidebarActive ? "lg:pr-80" : ""}`}>
                 <Switch>
                   <ProtectedRoute
                     exact
@@ -288,34 +329,14 @@ function App() {
                 </Switch>
               </main>
               
-              {/* Right Sidebar - Hidden on mobile, fixed on desktop */}
-              <aside className="hidden lg:block fixed right-0 top-16 w-80 h-screen">
-                <Right />
-              </aside>
-            </div>
-          </div>
-        ) : (
-          <Switch>
-            <Route exact path="/">
-              <Home />
-            </Route>
-            <Route exact path="/api-docs">
-              <div className="min-h-screen bg-white">
-                <PublicNavbar />
-                <div className="pt-16">
-                  <ApiDocumentation />
-                </div>
-              </div>
-            </Route>
-            <Route exact path="/register">
-              <Register />
-            </Route>
-            <Route exact path="/auth">
-              <Auth onAuthenticate={setAuthenticated} />
-            </Route>
-          </Switch>
+              {/* Right Sidebar - Hidden on mobile, fixed on desktop; only
+                  mounted on pages that have contextual cards to show. */}
+        {sidebarActive && (
+          <aside className="hidden lg:block fixed right-0 top-16 w-80 h-screen">
+            <Right />
+          </aside>
         )}
-      </Router>
+      </div>
     </div>
   );
 }

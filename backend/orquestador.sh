@@ -21,6 +21,7 @@ declare -a configs=(
   "$(pwd) container 5001"
   "$(pwd) room 5002"
   "$(pwd) package 5003"
+  "$(pwd) tars 5004"
 )
 
 # Start Uvicorn instances
