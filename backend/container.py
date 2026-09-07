@@ -8,7 +8,7 @@ import tarfile
 import threading
 import datetime
 import asyncio
-from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 import docker
@@ -322,6 +322,75 @@ async def install_package_nested(outer_container_id: str, inner_container_id: st
         raise HTTPException(status_code=500, detail={'error': 'Failed to install package', 'message': str(e)})
 
 # ---------------------------------------------------------------------------
+# Secrets vault (per-workspace env-style secrets; values never leave the API)
+# ---------------------------------------------------------------------------
+
+_secrets_db = MongoClient(MONGO_URL)['kubehub']
+secrets = _secrets_db['secrets']
+
+SECRET_KEY_SANITIZE_RE = re.compile(r"[^A-Z0-9_]")
+# Whole-value secret reference in a stack env: "${SECRET_KEY}" and nothing else.
+SECRET_REF_RE = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
+
+def sanitize_secret_key(raw) -> str:
+    """Env-style key: uppercased, restricted to [A-Z0-9_]."""
+    return SECRET_KEY_SANITIZE_RE.sub("", str(raw or "").upper())
+
+def resolve_secrets(parent_name: str) -> dict:
+    """All secrets for a workspace as {key: value}. Values are read here and
+    only ever injected into container env — never returned to callers."""
+    return {doc["key"]: doc.get("value", "")
+            for doc in secrets.find({"parent_name": parent_name})}
+
+@app.post("/container/{parent_id}/secrets")
+async def set_secret(parent_id: str, body: dict, host: str = None, user=Depends(require_user)):
+    """Upsert one secret for a workspace. Body: {key, value}. The value is
+    stored but never echoed back, and the value is kept out of the event log."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    key = sanitize_secret_key(body.get("key") if isinstance(body, dict) else None)
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required ([A-Z0-9_])")
+    if not isinstance(body, dict) or "value" not in body:
+        raise HTTPException(status_code=400, detail="value is required")
+    value = str(body.get("value"))
+    secrets.update_one(
+        {"parent_name": parent.name, "key": key},
+        {"$set": {"parent_name": parent.name, "key": key, "value": value},
+         "$setOnInsert": {"created_at": utc_now_iso()}},
+        upsert=True,
+    )
+    record_event(parent.name, "secret_set", f"secret {key} set", user.get("user_id"))
+    return {"key": key}
+
+@app.get("/container/{parent_id}/secrets")
+async def list_secrets(parent_id: str, host: str = None, user=Depends(require_user)):
+    """List a workspace's secret keys — KEYS ONLY, values never leave here."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    return [{"key": doc["key"]}
+            for doc in secrets.find({"parent_name": parent.name}).sort("key", 1)]
+
+@app.delete("/container/{parent_id}/secrets/{key}")
+async def delete_secret(parent_id: str, key: str, host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    sanitized = sanitize_secret_key(key)
+    if not secrets.find_one_and_delete({"parent_name": parent.name, "key": sanitized}):
+        raise HTTPException(status_code=404, detail="Secret not found")
+    record_event(parent.name, "secret_deleted", f"secret {sanitized} deleted", user.get("user_id"))
+    return {"deleted": sanitized}
+
+# ---------------------------------------------------------------------------
 # Stacks (deploy a multi-service template into a workspace parent)
 # ---------------------------------------------------------------------------
 
@@ -330,6 +399,49 @@ STACK_MAX_REPLICAS = 10
 STACK_NAME_SANITIZE_RE = re.compile(r"[^a-z0-9-]")
 STACK_RESTART_POLICIES = ("no", "always")
 STACK_PROBE_TYPES = ("http", "tcp", "cmd")
+STACK_ENV_KEY_RE = re.compile(r"^[A-Za-z0-9_]+$")
+STACK_VOLUME_NAME_SANITIZE_RE = re.compile(r"[^a-z0-9-]")
+STACK_MAX_ENV = 50
+STACK_MAX_VOLUMES = 20
+
+def parse_stack_env(name, env):
+    """Validate one service's env spec: a flat dict {KEY: value} with keys in
+    [A-Za-z0-9_] and values coerced to str. A value may be a whole-value secret
+    reference "${SECRET_KEY}" (resolved at run time). Raises 400 when
+    malformed."""
+    if not isinstance(env, dict):
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} env must be an object")
+    if len(env) > STACK_MAX_ENV:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} has too many env vars (max {STACK_MAX_ENV})")
+    validated = {}
+    for key, value in env.items():
+        if not isinstance(key, str) or not STACK_ENV_KEY_RE.match(key):
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} env key {key!r} must match [A-Za-z0-9_]")
+        if isinstance(value, bool) or value is None or isinstance(value, (dict, list)):
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} env {key} value must be a scalar")
+        validated[key] = str(value)
+    return validated
+
+def parse_stack_volumes(name, volumes):
+    """Validate one service's volumes spec: a list of "volname:/container/path".
+    volname is sanitized to [a-z0-9-] and the path must be absolute. Raises 400
+    when malformed. Returns [{"name", "path"}]."""
+    if not isinstance(volumes, list):
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} volumes must be a list")
+    if len(volumes) > STACK_MAX_VOLUMES:
+        raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} has too many volumes (max {STACK_MAX_VOLUMES})")
+    validated = []
+    for entry in volumes:
+        if not isinstance(entry, str) or ":" not in entry:
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} volume must be \"volname:/path\"")
+        raw_name, path = entry.split(":", 1)
+        volname = STACK_VOLUME_NAME_SANITIZE_RE.sub("", raw_name.lower())
+        if not volname:
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} volume needs a name ([a-z0-9-])")
+        if not path.startswith("/"):
+            raise HTTPException(status_code=400, detail=f"Invalid stack.json: service {name} volume path must start with /")
+        validated.append({"name": volname, "path": path})
+    return validated
 
 def parse_stack_probe(name, probe):
     """Validate one service's probe spec ({"type": "http"|"tcp"|"cmd", ...});
@@ -374,8 +486,10 @@ def parse_stack_autoscale(name, autoscale):
 def parse_stack_services(files):
     """Validate a stack plugin's stack.json: {"services": [{"name", "image",
     "shell"?, "replicas"?, "restart"?, "memory"?, "cpus"?, "probe"?,
-    "autoscale"?}]}. Names are sanitized to [a-z0-9-]; an autoscale spec
-    implies restart "always"; raises 400 on anything malformed."""
+    "autoscale"?, "env"?, "volumes"?}]}. Names are sanitized to [a-z0-9-]; an
+    autoscale spec implies restart "always"; env is a {KEY: value} dict (values
+    may be "${SECRET_KEY}" refs); volumes are "volname:/path" strings; raises
+    400 on anything malformed."""
     by_name = {f["name"]: f for f in files}
     stack_file = by_name.get("stack.json")
     if not stack_file or not stack_file.get("content"):
@@ -410,6 +524,8 @@ def parse_stack_services(files):
         cpus = str(service.get("cpus") or "").strip()
         probe = parse_stack_probe(name, service["probe"]) if service.get("probe") is not None else None
         autoscale = parse_stack_autoscale(name, service["autoscale"]) if service.get("autoscale") is not None else None
+        env = parse_stack_env(name, service["env"]) if service.get("env") is not None else {}
+        volumes = parse_stack_volumes(name, service["volumes"]) if service.get("volumes") is not None else []
         if autoscale:
             restart = "always"
         validated.append({
@@ -417,6 +533,7 @@ def parse_stack_services(files):
             "replicas": replicas, "restart": restart,
             "memory": memory, "cpus": cpus,
             "probe": probe, "autoscale": autoscale,
+            "env": env, "volumes": volumes,
         })
     return validated
 
@@ -433,25 +550,70 @@ def informative_docker_line(output):
             return line
     return next((l for l in reversed(lines) if "--help" not in l), lines[-1])
 
+VOLUME_NAME_PREFIX = "lat-vol-"
+
+def parent_short(parent) -> str:
+    """Stable short slug of a parent for namespacing its named volumes; kept in
+    [a-z0-9-] and truncated so the resulting volume name stays sane."""
+    return STACK_VOLUME_NAME_SANITIZE_RE.sub("", parent.name.lower())[:12] or parent.id[:12]
+
+def namespaced_volume_name(parent, volname: str) -> str:
+    """A service volume's real (per-workspace) docker volume name inside the
+    parent: lat-vol-<parentShort>-<volname>."""
+    return f"{VOLUME_NAME_PREFIX}{parent_short(parent)}-{volname}"
+
+def shell_single_quote(value: str) -> str:
+    """Wrap a value in single quotes safe for POSIX sh, escaping embedded
+    single quotes as '\\'' — so e.g. p@ss'w0rd becomes 'p@ss'\\''w0rd'. The
+    whole run_stack_container command runs via parent.exec_run("sh -c '...'"),
+    so env values must survive that outer sh -c intact."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
 def run_stack_container(parent, service, index):
     """docker run one replica (<service>-<index>) inside the parent; returns
     (ok, informative_line) and never raises. Restart policy is deliberately NOT
     passed to docker — the reconciler owns it. Idempotent: an existing
-    container with the same name is replaced (docker compose up semantics)."""
+    container with the same name is replaced (docker compose up semantics).
+    Env vars (with ${SECRET} refs resolved against the workspace vault) and
+    named volumes (namespaced per workspace, auto-created by docker) ride
+    along with the service spec."""
     name = f"{service['name']}-{index}"
     command = f"docker rm -f {name} >/dev/null 2>&1; docker run -dit --privileged --name {name}"
     if service.get("memory"):
         command += f" --memory {service['memory']}"
     if service.get("cpus"):
         command += f" --cpus {service['cpus']}"
+    notes = []
+    env = service.get("env") or {}
+    if env:
+        vault = resolve_secrets(parent.name)
+        for key, raw_value in env.items():
+            match = SECRET_REF_RE.match(str(raw_value))
+            if match:
+                secret_key = match.group(1)
+                if secret_key not in vault:
+                    notes.append(f"unknown secret {secret_key}")
+                value = vault.get(secret_key, "")
+            else:
+                value = str(raw_value)
+            command += f" -e {key}={shell_single_quote(value)}"
+    for volume in service.get("volumes") or []:
+        real = namespaced_volume_name(parent, volume["name"])
+        command += f" -v {real}:{volume['path']}"
     command += f" {service['image']}"
     if service.get("shell"):
         command += f" {service['shell']}"
     try:
-        exec_result = parent.exec_run(f"sh -c '{command}'", privileged=True)
+        # List form (not the f"sh -c '{command}'" string form used elsewhere):
+        # docker-py shlex.splits a *string* cmd, which mangles the '\'' escapes
+        # in single-quoted env values. Passing the argv list skips that split,
+        # so the command reaches a real sh unchanged and the quoting holds.
+        exec_result = parent.exec_run(["sh", "-c", command], privileged=True)
         output = exec_result.output.decode("utf-8", errors="replace").strip()
         line = informative_docker_line(output)
         ok = exec_result.exit_code == 0 and "error" not in line.lower()
+        if notes:
+            line = (line + " (" + "; ".join(notes) + ")").strip()
         return ok, line
     except Exception as e:
         return False, str(e)
@@ -514,6 +676,120 @@ async def deploy_stack(parent_id: str, package_id: str, host: str = None, user=D
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={'error': 'Failed to deploy stack', 'message': str(e)})
+
+# ---------------------------------------------------------------------------
+# Persistent volumes (per-workspace named docker volumes, lat-vol-<short>-*)
+# ---------------------------------------------------------------------------
+
+@app.get("/container/{parent_id}/volumes")
+async def list_volumes(parent_id: str, host: str = None, user=Depends(require_user)):
+    """List a workspace's persistent named volumes (lat-vol-<parentShort>-*),
+    with the prefix stripped and the mount-as name a stack.json would use."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    prefix = f"{VOLUME_NAME_PREFIX}{parent_short(parent)}-"
+    exec_result = parent.exec_run(
+        "sh -c 'docker volume ls --format \"{{.Name}}\"'", privileged=True)
+    volumes = []
+    for line in exec_result.output.decode("utf-8", errors="replace").splitlines():
+        real = line.strip()
+        if real.startswith(prefix):
+            short = real[len(prefix):]
+            volumes.append({"name": short, "mountable_as": f"{short}:/path"})
+    return volumes
+
+@app.delete("/container/{parent_id}/volumes/{name}")
+async def delete_volume(parent_id: str, name: str, host: str = None, user=Depends(require_user)):
+    """Remove one workspace volume by its short name. Docker refuses to remove a
+    volume still in use — that surfaces as a 409 carrying docker's message."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    short = STACK_VOLUME_NAME_SANITIZE_RE.sub("", name.lower())
+    if not short:
+        raise HTTPException(status_code=400, detail="Invalid volume name")
+    real = namespaced_volume_name(parent, short)
+    exec_result = parent.exec_run(
+        ["sh", "-c", f"docker volume rm {real}"], privileged=True)
+    output = exec_result.output.decode("utf-8", errors="replace").strip()
+    if exec_result.exit_code != 0:
+        raise HTTPException(status_code=409, detail=output or f"Failed to remove volume {short}")
+    record_event(parent.name, "volume_deleted", f"volume {short} deleted", user.get("user_id"))
+    return {"deleted": short}
+
+# ---------------------------------------------------------------------------
+# Export a running workspace as a reproducible stack template
+# ---------------------------------------------------------------------------
+
+EXPORT_ENV_SKIP_KEYS = ("PATH",)
+
+def export_child_service(parent, child_name: str):
+    """Best-effort: docker inspect one running child inside the parent and shape
+    it into a stack.json service ({name, image, env, volumes}). Returns None on
+    any inspect failure (the caller skips it)."""
+    fmt = "{{json .Config.Image}}|{{json .Config.Env}}|{{json .Mounts}}"
+    exec_result = parent.exec_run(
+        ["sh", "-c", f"docker inspect --format '{fmt}' {child_name}"], privileged=True)
+    if exec_result.exit_code != 0:
+        return None
+    raw = exec_result.output.decode("utf-8", errors="replace").strip()
+    try:
+        image_json, env_json, mounts_json = raw.split("|", 2)
+        image = json.loads(image_json)
+        env_list = json.loads(env_json) or []
+        mounts = json.loads(mounts_json) or []
+    except (ValueError, TypeError):
+        return None
+    env = {}
+    for entry in env_list:
+        if "=" not in entry:
+            continue
+        key, value = entry.split("=", 1)
+        if key in EXPORT_ENV_SKIP_KEYS:
+            continue
+        env[key] = value
+    volumes = []
+    prefix = f"{VOLUME_NAME_PREFIX}{parent_short(parent)}-"
+    for mount in mounts:
+        if mount.get("Type") != "volume":
+            continue
+        source = mount.get("Name", "")
+        destination = mount.get("Destination", "")
+        if not destination:
+            continue
+        short = source[len(prefix):] if source.startswith(prefix) else source
+        volumes.append(f"{short}:{destination}")
+    return {"name": child_name, "image": image, "env": env, "volumes": volumes}
+
+@app.get("/container/{parent_id}/export")
+async def export_workspace(parent_id: str, host: str = None, user=Depends(require_user)):
+    """Snapshot a running workspace as a stack.json-shaped template: every
+    running child except the editor and expose sidecars, with its image, env
+    (all non-PATH vars) and named-volume mounts. Best-effort — children that
+    fail to inspect are skipped."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    exec_result = parent.exec_run(
+        "sh -c 'docker ps --format \"{{.Names}}\"'", privileged=True)
+    services = []
+    for line in exec_result.output.decode("utf-8", errors="replace").splitlines():
+        child = line.strip()
+        if not child or is_snapshot_exempt(child):
+            continue
+        service = export_child_service(parent, child)
+        if service is not None:
+            services.append(service)
+    record_event(parent.name, "workspace_exported",
+                 f"exported {len(services)} services as a stack", user.get("user_id"))
+    return {"stack": {"services": services}, "services": len(services)}
 
 # ---------------------------------------------------------------------------
 # CI runs (GitHub-Actions-style pipelines for plugins)
@@ -1602,6 +1878,8 @@ async def get_deployment(parent: str, user=Depends(require_user)):
             "cpus": service["cpus"],
             "probe": service["probe"],
             "autoscale": service["autoscale"],
+            "env": list((service.get("env") or {}).keys()),
+            "volumes": service.get("volumes") or [],
             "containers": containers,
         })
     return {
@@ -2515,3 +2793,403 @@ async def get_topology(host: str = None, user=Depends(require_user)):
         return {"networks": networks}
     except Exception as e:
         raise HTTPException(status_code=500, detail={'error': 'Failed to get topology', 'message': str(e)})
+
+# ---------------------------------------------------------------------------
+# Cron jobs (k8s CronJob-style: run a one-off container on a cron schedule)
+# ---------------------------------------------------------------------------
+
+cronjobs = ci_db['cronjobs']
+
+CRON_NAME_SANITIZE_RE = re.compile(r"[^a-z0-9-]")
+CRON_OUTPUT_MAX_CHARS = 500
+CRON_ENV_MAX = 50
+CRON_SCHEDULER_INTERVAL_SECONDS = 60
+
+# 5-field cron ranges (min hour dom mon dow); dow 0-6 (Sunday=0).
+CRON_FIELD_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
+
+_cron_scheduler_lock = threading.Lock()
+_cron_scheduler_started = False
+_cron_last_fired = {}   # "cronjob_id" -> "YYYY-MM-DDTHH:MM" minute already fired
+
+
+def parse_cron_field(field, low, high):
+    """Expand one cron field into a set of matching ints, supporting `*`,
+    `*/n`, `a-b`, `a,b,c` and plain ints. Raises ValueError when malformed or
+    out of range so the caller can turn it into a 400."""
+    values = set()
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(f"empty term in {field!r}")
+        step = 1
+        if "/" in part:
+            base, _, step_raw = part.partition("/")
+            step = int(step_raw)
+            if step <= 0:
+                raise ValueError(f"step must be positive in {part!r}")
+        else:
+            base = part
+        if base == "*":
+            start, end = low, high
+        elif "-" in base:
+            start_raw, _, end_raw = base.partition("-")
+            start, end = int(start_raw), int(end_raw)
+        else:
+            start = end = int(base)
+        if start < low or end > high or start > end:
+            raise ValueError(f"term {part!r} out of range [{low},{high}]")
+        values.update(range(start, end + 1, step))
+    return values
+
+
+def parse_cron_expr(expr):
+    """Parse a 5-field cron expression into a list of matching-int sets. Raises
+    ValueError when it does not have exactly 5 fields or any field is bad."""
+    fields = str(expr or "").split()
+    if len(fields) != 5:
+        raise ValueError("cron expression must have exactly 5 fields")
+    return [parse_cron_field(field, low, high)
+            for field, (low, high) in zip(fields, CRON_FIELD_RANGES)]
+
+
+def cron_matches(expr, dt):
+    """True when the datetime `dt` (UTC, minute resolution) satisfies the cron
+    expression. Uses Python's weekday convention mapped to cron's (Sunday=0)."""
+    minutes, hours, doms, months, dows = parse_cron_expr(expr)
+    cron_dow = (dt.weekday() + 1) % 7  # Mon=0..Sun=6 -> Sun=0..Sat=6
+    return (dt.minute in minutes and dt.hour in hours
+            and dt.day in doms and dt.month in months and cron_dow in dows)
+
+
+def serialize_cronjob(doc):
+    doc = dict(doc)
+    doc["id"] = str(doc.pop("_id"))
+    return doc
+
+
+def find_cronjob_or_404(cronjob_id):
+    try:
+        doc = cronjobs.find_one({"_id": ObjectId(cronjob_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid cronjob id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Cronjob not found")
+    return doc
+
+
+def parse_cron_env(env):
+    """Validate an optional cron env spec: a flat dict {KEY: scalar} with keys in
+    [A-Za-z0-9_], values coerced to str. Values may be a whole-value secret
+    reference "${SECRET_KEY}" resolved at run time. Raises 400 when malformed."""
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise HTTPException(status_code=400, detail="env must be an object")
+    if len(env) > CRON_ENV_MAX:
+        raise HTTPException(status_code=400, detail=f"too many env vars (max {CRON_ENV_MAX})")
+    validated = {}
+    for key, value in env.items():
+        if not isinstance(key, str) or not STACK_ENV_KEY_RE.match(key):
+            raise HTTPException(status_code=400, detail=f"env key {key!r} must match [A-Za-z0-9_]")
+        if isinstance(value, bool) or value is None or isinstance(value, (dict, list)):
+            raise HTTPException(status_code=400, detail=f"env {key} value must be a scalar")
+        validated[key] = str(value)
+    return validated
+
+
+def run_cronjob(doc):
+    """Run one cronjob once, right now, as a one-off `docker run --rm` container
+    inside the parent. Env ${SECRET} refs resolve against the workspace vault
+    exactly like stacks. Captures exit code + last output line into last_status/
+    last_output/last_run. Never raises — a broken cronjob must not take down the
+    scheduler or the request that triggered it."""
+    fields = {
+        "last_run": utc_now_iso(),
+        "last_status": "error",
+        "last_output": "",
+    }
+    try:
+        parent = client.containers.get(doc["parent_name"])
+        name = f"cron-{doc['name']}-{int(time.time())}"
+        command = f"docker run --rm --name {name}"
+        env = doc.get("env") or {}
+        if env:
+            vault = resolve_secrets(doc["parent_name"])
+            for key, raw_value in env.items():
+                match = SECRET_REF_RE.match(str(raw_value))
+                value = vault.get(match.group(1), "") if match else str(raw_value)
+                command += f" -e {key}={shell_single_quote(value)}"
+        command += f" {doc['image']} sh -c {shell_single_quote(doc['command'])}"
+        # List form (not the f"sh -c '{command}'" string form): docker-py
+        # shlex.splits a string cmd and mangles the '\'' escapes in the
+        # single-quoted command/env values, so pass the argv list instead.
+        exec_result = parent.exec_run(["sh", "-c", command], privileged=True)
+        output = exec_result.output.decode("utf-8", errors="replace")
+        last_line = next((l for l in reversed(output.splitlines()) if l.strip()), "")
+        fields["last_status"] = "ok" if exec_result.exit_code == 0 else "error"
+        fields["last_output"] = (last_line or output).strip()[-CRON_OUTPUT_MAX_CHARS:]
+    except Exception as e:
+        fields["last_output"] = str(e)[-CRON_OUTPUT_MAX_CHARS:]
+    cronjobs.update_one({"_id": doc["_id"]}, {"$set": fields})
+    return cronjobs.find_one({"_id": doc["_id"]})
+
+
+def cron_scheduler_loop():
+    """Sleep until the top of the next minute, then fire every enabled cronjob
+    whose schedule matches this minute and that has not already fired this
+    minute. Sequential — cron jobs are short."""
+    while True:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        time.sleep(max(1, 60 - now.second))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stamp = now.strftime("%Y-%m-%dT%H:%M")
+        try:
+            docs = list(cronjobs.find({"enabled": True}))
+        except Exception:
+            docs = []
+        for doc in docs:
+            key = str(doc["_id"])
+            if _cron_last_fired.get(key) == stamp:
+                continue
+            try:
+                if cron_matches(doc.get("schedule", ""), now):
+                    _cron_last_fired[key] = stamp
+                    run_cronjob(doc)
+            except Exception:
+                pass
+
+
+def ensure_cron_scheduler_started():
+    """Lazily start the single cron scheduler daemon thread. Safe to call on
+    every write/read."""
+    global _cron_scheduler_started
+    with _cron_scheduler_lock:
+        if _cron_scheduler_started:
+            return
+        threading.Thread(
+            target=cron_scheduler_loop, name="lattice-cron-scheduler", daemon=True,
+        ).start()
+        _cron_scheduler_started = True
+
+
+@app.post("/container/{parent_id}/cronjobs")
+async def create_cronjob(parent_id: str, body: dict, host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    name = CRON_NAME_SANITIZE_RE.sub("", str(body.get("name") or "").lower())
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required ([a-z0-9-])")
+    schedule = str(body.get("schedule") or "").strip()
+    try:
+        parse_cron_expr(schedule)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid schedule: {e}")
+    image = str(body.get("image") or "").strip()
+    if not image:
+        raise HTTPException(status_code=400, detail="image is required")
+    command = str(body.get("command") or "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command is required")
+    env = parse_cron_env(body.get("env"))
+    doc = {
+        "parent_name": parent.name,
+        "parent_id": parent.id,
+        "name": name,
+        "schedule": schedule,
+        "image": image,
+        "command": command,
+        "env": env,
+        "last_run": None,
+        "last_status": "idle",
+        "last_output": None,
+        "next_run": None,
+        "created_by": user.get("user_id"),
+        "created_at": utc_now_iso(),
+        "enabled": True,
+    }
+    doc["_id"] = cronjobs.insert_one(doc).inserted_id
+    record_event(parent.name, "cronjob_created",
+                 f"cronjob {name} ({schedule}) -> {image}", user.get("user_id"))
+    ensure_cron_scheduler_started()
+    return serialize_cronjob(doc)
+
+
+@app.get("/container/{parent_id}/cronjobs")
+async def list_cronjobs(parent_id: str, host: str = None, user=Depends(require_user)):
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    ensure_cron_scheduler_started()
+    return [serialize_cronjob(doc)
+            for doc in cronjobs.find({"parent_name": parent.name}).sort("created_at", -1)]
+
+
+@app.delete("/container/{parent_id}/cronjobs/{cronjob_id}")
+async def delete_cronjob(parent_id: str, cronjob_id: str, host: str = None, user=Depends(require_user)):
+    doc = find_cronjob_or_404(cronjob_id)
+    cronjobs.delete_one({"_id": doc["_id"]})
+    _cron_last_fired.pop(str(doc["_id"]), None)
+    record_event(doc.get("parent_name"), "cronjob_deleted",
+                 f"cronjob {doc.get('name')} deleted", user.get("user_id"))
+    return {"deleted": cronjob_id}
+
+
+@app.post("/container/{parent_id}/cronjobs/{cronjob_id}/run")
+async def run_cronjob_now(parent_id: str, cronjob_id: str, host: str = None, user=Depends(require_user)):
+    doc = find_cronjob_or_404(cronjob_id)
+    updated = run_cronjob(doc)
+    record_event(doc.get("parent_name"), "cronjob_run",
+                 f"cronjob {doc.get('name')} run manually", user.get("user_id"))
+    return serialize_cronjob(updated)
+
+
+@app.post("/cronjobs/{cronjob_id}/toggle")
+async def toggle_cronjob(cronjob_id: str, user=Depends(require_user)):
+    doc = find_cronjob_or_404(cronjob_id)
+    enabled = not doc.get("enabled", True)
+    cronjobs.update_one({"_id": doc["_id"]}, {"$set": {"enabled": enabled}})
+    record_event(doc.get("parent_name"), "cronjob_toggled",
+                 f"cronjob {doc.get('name')} {'enabled' if enabled else 'disabled'}",
+                 user.get("user_id"))
+    return serialize_cronjob(cronjobs.find_one({"_id": doc["_id"]}))
+
+# ---------------------------------------------------------------------------
+# File manager (upload/download/list files inside a nested child)
+# ---------------------------------------------------------------------------
+
+UPLOAD_STAGING_DIR = "/opt/lattice/.upload"
+DOWNLOAD_STAGING_DIR = "/opt/lattice/.download"
+FILE_MANAGER_ABS_PATH_RE = re.compile(r"^/[^\0]*$")
+
+
+def build_single_file_tar(filename: str, data: bytes) -> bytes:
+    """Tar one in-memory file (no leading directory) for put_archive."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo(name=filename)
+        info.size = len(data)
+        info.mode = 0o644
+        tar.addfile(info, io.BytesIO(data))
+    buffer.seek(0)
+    return buffer.read()
+
+
+@app.post("/container/{parent_id}/{child}/upload")
+async def upload_file_to_child(parent_id: str, child: str, file: UploadFile = File(...),
+                               path: str = Form("/root"), host: str = None,
+                               user=Depends(require_user)):
+    """Upload a file into a nested child: put_archive the bytes into the parent's
+    own filesystem at a staging dir, then `docker cp` it from the parent into the
+    child at the destination directory."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    filename = os.path.basename(file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+    dest_dir = str(path or "/root").strip() or "/root"
+    if not FILE_MANAGER_ABS_PATH_RE.match(dest_dir):
+        raise HTTPException(status_code=400, detail="path must be an absolute directory")
+    try:
+        data = await file.read()
+        parent.exec_run(["sh", "-c", f"mkdir -p {shell_single_quote(UPLOAD_STAGING_DIR)}"], privileged=True)
+        parent.put_archive(UPLOAD_STAGING_DIR, build_single_file_tar(filename, data))
+        staged = f"{UPLOAD_STAGING_DIR}/{filename}"
+        copy_command = (
+            f"docker exec {shell_single_quote(child)} mkdir -p {shell_single_quote(dest_dir)} && "
+            f"docker cp {shell_single_quote(staged)} "
+            f"{shell_single_quote(child)}:{shell_single_quote(dest_dir + '/')}"
+        )
+        exec_result = parent.exec_run(["sh", "-c", copy_command], privileged=True)
+        parent.exec_run(["sh", "-c", f"rm -f {shell_single_quote(staged)}"], privileged=True)
+        if exec_result.exit_code != 0:
+            raise HTTPException(status_code=500, detail={
+                "error": "Failed to copy file into child",
+                "message": exec_result.output.decode("utf-8", errors="replace"),
+            })
+        record_event(parent.name, "file_uploaded",
+                     f"{filename} -> {child}:{dest_dir}", user.get("user_id"))
+        return {"name": filename, "path": f"{dest_dir}/{filename}", "ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Failed to upload file", "message": str(e)})
+
+
+@app.get("/container/{parent_id}/{child}/download")
+async def download_file_from_child(parent_id: str, child: str, path: str,
+                                   host: str = None, user=Depends(require_user_query)):
+    """Download an absolute file path from a nested child (?token= auth so plain
+    browser links work): `docker cp` it from the child into the parent's staging
+    dir, read it back with get_archive, extract the single file bytes and stream
+    it as an attachment."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    src = str(path or "").strip()
+    if not FILE_MANAGER_ABS_PATH_RE.match(src):
+        raise HTTPException(status_code=400, detail="path must be an absolute file path")
+    base = os.path.basename(src.rstrip("/")) or "download"
+    staged = f"{DOWNLOAD_STAGING_DIR}/{base}"
+    try:
+        parent.exec_run(["sh", "-c", f"mkdir -p {shell_single_quote(DOWNLOAD_STAGING_DIR)}"], privileged=True)
+        copy_command = (
+            f"docker cp {shell_single_quote(child)}:{shell_single_quote(src)} "
+            f"{shell_single_quote(staged)}"
+        )
+        exec_result = parent.exec_run(["sh", "-c", copy_command], privileged=True)
+        if exec_result.exit_code != 0:
+            raise HTTPException(status_code=404, detail="File not found in child")
+        bits, _ = parent.get_archive(staged)
+        archive = io.BytesIO(b"".join(bits))
+        payload = b""
+        with tarfile.open(fileobj=archive) as tar:
+            member = next((m for m in tar.getmembers() if m.isreg()), None)
+            if member is None:
+                raise HTTPException(status_code=404, detail="File not found in child")
+            payload = tar.extractfile(member).read()
+        parent.exec_run(["sh", "-c", f"rm -f {shell_single_quote(staged)}"], privileged=True)
+        filename = base.replace('"', "")
+        return StreamingResponse(
+            io.BytesIO(payload),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Failed to download file", "message": str(e)})
+
+
+@app.get("/container/{parent_id}/{child}/ls")
+async def list_child_files(parent_id: str, child: str, path: str = "/root",
+                           host: str = None, user=Depends(require_user)):
+    """Simple file browser: `ls -la <path>` inside the child (via docker exec
+    from the parent). Returns raw listing lines or an error."""
+    docker_client = get_client(host)
+    try:
+        parent = docker_client.containers.get(parent_id)
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Parent container not found")
+    target = str(path or "/root").strip() or "/root"
+    if not FILE_MANAGER_ABS_PATH_RE.match(target):
+        raise HTTPException(status_code=400, detail="path must be an absolute directory")
+    command = f"docker exec {shell_single_quote(child)} ls -la {shell_single_quote(target)}"
+    exec_result = parent.exec_run(["sh", "-c", command], privileged=True)
+    output = exec_result.output.decode("utf-8", errors="replace")
+    if exec_result.exit_code != 0:
+        return {"path": target, "error": output.strip()}
+    entries = [line for line in output.splitlines() if line.strip()]
+    return {"path": target, "entries": entries}

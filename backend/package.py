@@ -652,6 +652,166 @@ CATALOG = [
         },
     },
     {
+        "key": "postgres-adminer",
+        "name": "Postgres + Adminer",
+        "description": "PostgreSQL 16 with a persistent volume plus the Adminer web UI.",
+        "icon": "\U0001F418",  # elephant
+        "category": "Databases",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "db",
+                        "image": "postgres:16-alpine",
+                        "replicas": 1,
+                        "restart": "always",
+                        "env": {
+                            "POSTGRES_PASSWORD": "lattice",
+                            "POSTGRES_USER": "lattice",
+                            "POSTGRES_DB": "app",
+                        },
+                        "volumes": ["pgdata:/var/lib/postgresql/data"],
+                        "probe": {"type": "tcp", "port": 5432},
+                    },
+                    {
+                        "name": "adminer",
+                        "image": "adminer:latest",
+                        "replicas": 1,
+                        "restart": "always",
+                    },
+                ]
+            }, indent=2),
+            "README.md": (
+                "# Postgres + Adminer\n\n"
+                "Deploys `postgres:16-alpine` with a persistent `pgdata` volume and\n"
+                "the `adminer:latest` web database client.\n\n"
+                "Default credentials: user `lattice`, password `lattice`, database `app`.\n"
+                "Expose the `adminer` service on port `8080` to reach the UI, then log\n"
+                "in against the `db` container. Edit `stack.json` to swap the plaintext\n"
+                "password for a `${SECRET_KEY}` reference once you have a secret.\n"
+            ),
+        },
+    },
+    {
+        "key": "wordpress",
+        "name": "WordPress + MariaDB",
+        "description": "WordPress backed by MariaDB 11 with a persistent database volume.",
+        "icon": "\U0001F4DD",  # memo
+        "category": "Web",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "db",
+                        "image": "mariadb:11",
+                        "replicas": 1,
+                        "restart": "always",
+                        "env": {
+                            "MARIADB_ROOT_PASSWORD": "lattice",
+                            "MARIADB_DATABASE": "wordpress",
+                            "MARIADB_USER": "wp",
+                            "MARIADB_PASSWORD": "wp",
+                        },
+                        "volumes": ["wpdb:/var/lib/mysql"],
+                    },
+                    {
+                        "name": "wordpress",
+                        "image": "wordpress:latest",
+                        "replicas": 1,
+                        "restart": "always",
+                        "env": {
+                            "WORDPRESS_DB_HOST": "db",
+                            "WORDPRESS_DB_USER": "wp",
+                            "WORDPRESS_DB_PASSWORD": "wp",
+                            "WORDPRESS_DB_NAME": "wordpress",
+                        },
+                    },
+                ]
+            }, indent=2),
+            "README.md": (
+                "# WordPress + MariaDB\n\n"
+                "Deploys `wordpress:latest` backed by `mariadb:11` with a persistent\n"
+                "`wpdb` volume. Default DB credentials: user `wp`, password `wp`,\n"
+                "database `wordpress` (root password `lattice`).\n\n"
+                "Expose the `wordpress` service on port `80` to run the installer.\n\n"
+                "Caveat: the template sets `WORDPRESS_DB_HOST=db`, assuming the\n"
+                "containers resolve each other by name. On the parent's default bridge\n"
+                "network, name-based DNS between children is not guaranteed - if\n"
+                "WordPress cannot reach the database, look up the `db` container's IP\n"
+                "and set `WORDPRESS_DB_HOST` to that address instead.\n"
+            ),
+        },
+    },
+    {
+        "key": "minio",
+        "name": "MinIO Object Storage",
+        "description": "S3-compatible object storage (Bitnami MinIO) with a persistent volume.",
+        "icon": "\U0001FAA3",  # bucket
+        "category": "Storage",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "minio",
+                        "image": "bitnami/minio:latest",
+                        "replicas": 1,
+                        "restart": "always",
+                        "env": {
+                            "MINIO_ROOT_USER": "lattice",
+                            "MINIO_ROOT_PASSWORD": "lattice123",
+                        },
+                        "volumes": ["miniodata:/bitnami/minio/data"],
+                    }
+                ]
+            }, indent=2),
+            "README.md": (
+                "# MinIO Object Storage\n\n"
+                "Deploys `bitnami/minio:latest` (starts with no custom command) with a\n"
+                "persistent `miniodata` volume. It is S3-compatible object storage.\n\n"
+                "Default credentials: root user `lattice`, root password `lattice123`.\n"
+                "Expose the console on port `9001` (the S3 API listens on `9000`).\n"
+                "Swap the password for a `${SECRET_KEY}` reference for real use.\n"
+            ),
+        },
+    },
+    {
+        "key": "grafana",
+        "name": "Grafana",
+        "description": "Grafana OSS dashboards with a persistent data volume.",
+        "icon": "\U0001F4CA",  # bar chart
+        "category": "Monitoring",
+        "kind": "stack",
+        "files": {
+            "stack.json": json.dumps({
+                "services": [
+                    {
+                        "name": "grafana",
+                        "image": "grafana/grafana-oss:latest",
+                        "replicas": 1,
+                        "restart": "always",
+                        "env": {
+                            "GF_SECURITY_ADMIN_USER": "admin",
+                            "GF_SECURITY_ADMIN_PASSWORD": "lattice",
+                        },
+                        "volumes": ["grafana:/var/lib/grafana"],
+                    }
+                ]
+            }, indent=2),
+            "README.md": (
+                "# Grafana\n\n"
+                "Deploys `grafana/grafana-oss:latest` with a persistent `grafana`\n"
+                "volume for dashboards and settings.\n\n"
+                "Default credentials: user `admin`, password `lattice`.\n"
+                "Expose the `grafana` service on port `3000` to open the UI, then add\n"
+                "your data sources. Move the admin password to a `${SECRET_KEY}` ref\n"
+                "for production.\n"
+            ),
+        },
+    },
+    {
         "key": "docker-101",
         "name": "Docker 101",
         "description": "A guided hands-on lab: run, inspect and remove your first container.",
